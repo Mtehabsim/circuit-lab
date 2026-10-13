@@ -1,0 +1,203 @@
+{
+  "id": "complete-the-pattern",
+  "order": 4,
+  "title": "Complete the pattern",
+  "difficulty": "Medium",
+  "category": "Circuit discovery",
+  "model": {
+    "name": "induction-toy",
+    "layers": 4,
+    "heads": 4,
+    "d_model": 128
+  },
+  "description": "A tiny transformer predicts the continuation associated with a repeated token. Find the two-head circuit that writes previous-token identity and uses it to retrieve the matching continuation.",
+  "behavior": "At the final position, the model finds an earlier occurrence whose previous token matches the current token, then predicts the token that followed that occurrence.",
+  "task_goal": "Identify both stages of the induction circuit, inspect the second head’s attention, and ablate both heads to establish causal involvement.",
+  "metric": "Induction completion accuracy",
+  "examples": [
+    {
+      "input": [
+        "A",
+        "B",
+        "C",
+        "A"
+      ],
+      "output": [
+        "B"
+      ]
+    },
+    {
+      "input": [
+        "D",
+        "E",
+        "F",
+        "D"
+      ],
+      "output": [
+        "E"
+      ]
+    },
+    {
+      "input": [
+        "red",
+        "blue",
+        "green",
+        "red"
+      ],
+      "output": [
+        "blue"
+      ]
+    }
+  ],
+  "example_note": "The final token repeats an earlier token; the model predicts what followed its earlier occurrence.",
+  "learning_objectives": [
+    "Read a two-head attention circuit",
+    "Trace a previous-token feature into a later query-key match",
+    "Test circuit stages with ablation"
+  ],
+  "tools": [
+    "tools.evaluate(dataset)",
+    "tools.attention(tokens, layer, head)",
+    "tools.ablate_head(tokens, layer, head)",
+    "tools.ablation_sweep(tokens)",
+    "tools.activation(tokens, name)",
+    "tools.logit_lens(tokens, layer=None)",
+    "tools.weight(name, layer=None, head=None)"
+  ],
+  "hints": [
+    "The circuit has an early feature-writing stage and a later retrieval stage.",
+    "At the final position, inspect layer 1 head 1.",
+    "Find earlier positions whose previous token matches the final token.",
+    "Ablate both the feature writer and retrieval head."
+  ],
+  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    tokens = dataset[0][\"tokens\"]\n    print(\"Induction accuracy:\", tools.evaluate(dataset)[\"accuracy\"])\n    pattern = tools.attention(tokens, 1, 1)\n    print(\"Final query attention:\", pattern[-1])\n    first_stage = tools.ablate_head(tokens, 0, 0)\n    second_stage = tools.ablate_head(tokens, 1, 1)\n    print(\"Ablations:\", first_stage, second_stage)\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": 0, \"head\": 0}, {\"type\": \"attention_head\", \"layer\": 1, \"head\": 1}]}\n",
+  "submission_schema": {
+    "components": [
+      {
+        "type": "attention_head",
+        "layer": "integer",
+        "head": "integer"
+      }
+    ]
+  },
+  "public_dataset": [
+    [
+      "A",
+      "B",
+      "C",
+      "A"
+    ],
+    [
+      "D",
+      "E",
+      "F",
+      "D"
+    ],
+    [
+      "red",
+      "blue",
+      "green",
+      "red"
+    ],
+    [
+      "7",
+      "2",
+      "9",
+      "7"
+    ]
+  ],
+  "hidden_dataset": [
+    [
+      "p",
+      "q",
+      "r",
+      "s",
+      "p"
+    ],
+    [
+      "u",
+      "v",
+      "w",
+      "x",
+      "u",
+      "y"
+    ],
+    [
+      "aa",
+      "bb",
+      "cc",
+      "dd",
+      "ee",
+      "aa"
+    ],
+    [
+      "K3",
+      "P5",
+      "R2",
+      "S8",
+      "T1",
+      "K3"
+    ]
+  ],
+  "explanation": {
+    "canonical_solution": "Layer 0 head 0 writes the previous token identity into a dedicated residual feature. Layer 1 head 1 queries for a prior position with that previous-token feature matching the current token, then copies the token that followed the prior match.",
+    "caution": "An induction-like attention pattern is not enough. Ablate each stage and check held-out sequences."
+  },
+  "schema_version": 1,
+  "grading_contract": [
+    {
+      "field": "components",
+      "type": "list[{type: \"attention_head\", layer: int, head: int}]",
+      "graded": true,
+      "checks": "Must identify exactly heads (layer 0, head 0) and (layer 1, head 1)."
+    },
+    {
+      "field": "tools.events",
+      "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
+      "graded": true,
+      "checks": "Must record both head ablations with drop > 0.5. Hidden baseline must be ≥ 0.95 and mean hidden drop ≥ 0.5."
+    }
+  ],
+  "tool_reference": [
+    {
+      "name": "tools",
+      "type": "ExperimentTools",
+      "description": "A helper object passed into solve(...). Use it to measure behavior and inspect or intervene on this challenge model."
+    },
+    {
+      "name": "tools.evaluate(dataset)",
+      "type": "dict[str, float | int]",
+      "description": "Measures task performance across records. Returns accuracy, correct, and total."
+    },
+    {
+      "name": "tools.attention(tokens, layer, head)",
+      "type": "list[list[float]]",
+      "description": "Returns the attention matrix. Row i shows where the query at token position i reads; columns are key positions."
+    },
+    {
+      "name": "tools.ablate_head(tokens, layer, head)",
+      "type": "dict: {type:str, layer:int, head:int, before:float, after:float, drop:float}",
+      "description": "Temporarily zeros one head and measures task accuracy before and after. Records an ablation event; drop is before minus after."
+    },
+    {
+      "name": "tools.ablation_sweep(tokens)",
+      "type": "list[ablation event dict]",
+      "description": "Runs ablate_head on every head for one token sequence, sorted by largest accuracy drop. Pass tokens, e.g. dataset[0][\"tokens\"], not the whole dataset."
+    },
+    {
+      "name": "tools.activation(tokens, name)",
+      "type": "list",
+      "description": "Reads a named activation tensor, such as a residual stream or MLP activation."
+    },
+    {
+      "name": "tools.logit_lens(tokens, layer=None)",
+      "type": "list[list[float]]",
+      "description": "Projects a residual stream through the unembedding to see token scores at a layer."
+    },
+    {
+      "name": "tools.weight(name, layer=None, head=None)",
+      "type": "list",
+      "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
+    }
+  ]
+}

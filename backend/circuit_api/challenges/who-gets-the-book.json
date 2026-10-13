@@ -1,0 +1,229 @@
+{
+  "id": "who-gets-the-book",
+  "order": 6,
+  "title": "Who gets the book?",
+  "difficulty": "Hard",
+  "category": "Name mover circuit",
+  "model": {
+    "name": "ioi-toy",
+    "layers": 4,
+    "heads": 4,
+    "d_model": 8
+  },
+  "description": "This compact IOI-style model receives two names and a subject-role marker. It predicts the other name as the indirect object. Find the heads that read the subject role and move the correct name to the output.",
+  "behavior": "Given NAME_A, NAME_B, and a subject marker, predict the other name at QUERY.",
+  "task_goal": "Identify the subject-finding and name-moving heads, show their attention targets, and causally verify both on held-out name pairs.",
+  "metric": "Indirect-object name accuracy",
+  "examples": [
+    {
+      "input": [
+        "John",
+        "Mary",
+        "SUBJECT_A",
+        "GAVE",
+        "BOOK",
+        "TO",
+        "QUERY"
+      ],
+      "output": [
+        "Mary"
+      ]
+    },
+    {
+      "input": [
+        "Lisa",
+        "Omar",
+        "SUBJECT_B",
+        "GAVE",
+        "BOOK",
+        "TO",
+        "QUERY"
+      ],
+      "output": [
+        "Lisa"
+      ]
+    },
+    {
+      "input": [
+        "Ada",
+        "Grace",
+        "SUBJECT_A",
+        "GAVE",
+        "BOOK",
+        "TO",
+        "QUERY"
+      ],
+      "output": [
+        "Grace"
+      ]
+    }
+  ],
+  "example_note": "SUBJECT_A means the first name gave the book; SUBJECT_B means the second name did. Predict the other person.",
+  "learning_objectives": [
+    "Follow role information through a circuit",
+    "Distinguish subject finding from name moving",
+    "Use head ablation to test a multi-head explanation"
+  ],
+  "tools": [
+    "tools.evaluate(dataset)",
+    "tools.attention(tokens, layer, head)",
+    "tools.ablate_head(tokens, layer, head)",
+    "tools.ablation_sweep(tokens)",
+    "tools.activation(tokens, name)",
+    "tools.logit_lens(tokens, layer=None)",
+    "tools.weight(name, layer=None, head=None)"
+  ],
+  "hints": [
+    "Find which token encodes the subject role.",
+    "Inspect layer 0 head 0 at the final query position.",
+    "Inspect layer 2 head 1 to see which name position it routes to.",
+    "Ablate the subject-finding and name-moving heads separately."
+  ],
+  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    tokens = dataset[0][\"tokens\"]\n    print(\"IOI accuracy:\", tools.evaluate(dataset)[\"accuracy\"])\n    print(\"Subject read:\", tools.attention(tokens, 0, 0)[-1])\n    print(\"Name moved:\", tools.attention(tokens, 2, 1)[-1])\n    subject_head = tools.ablate_head(tokens, 0, 0)\n    name_mover = tools.ablate_head(tokens, 2, 1)\n    print(\"Causal effects:\", subject_head, name_mover)\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": 0, \"head\": 0}, {\"type\": \"attention_head\", \"layer\": 2, \"head\": 1}]}\n",
+  "submission_schema": {
+    "components": [
+      {
+        "type": "attention_head",
+        "layer": "integer",
+        "head": "integer"
+      }
+    ]
+  },
+  "public_dataset": [
+    [
+      "John",
+      "Mary",
+      "SUBJECT_A",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Lisa",
+      "Omar",
+      "SUBJECT_B",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Ada",
+      "Grace",
+      "SUBJECT_A",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Lin",
+      "Mira",
+      "SUBJECT_B",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ]
+  ],
+  "hidden_dataset": [
+    [
+      "Nia",
+      "Zoe",
+      "SUBJECT_A",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Ivo",
+      "Uma",
+      "SUBJECT_B",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Kai",
+      "Noor",
+      "SUBJECT_A",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ],
+    [
+      "Rae",
+      "Sol",
+      "SUBJECT_B",
+      "GAVE",
+      "BOOK",
+      "TO",
+      "QUERY"
+    ]
+  ],
+  "explanation": {
+    "canonical_solution": "Layer 0 head 0 reads the subject-role marker. Layer 2 head 1 routes from the non-subject name position to the answer logits. Ablating either stage damages the IOI answer on balanced hidden name pairs.",
+    "caution": "Attention to a name is only a routing observation; ablation and held-out name pairs provide causal and generalization evidence."
+  },
+  "schema_version": 1,
+  "grading_contract": [
+    {
+      "field": "components",
+      "type": "list[{type: \"attention_head\", layer: int, head: int}]",
+      "graded": true,
+      "checks": "Must identify exactly the subject head (layer 0, head 0) and name-moving head (layer 2, head 1)."
+    },
+    {
+      "field": "tools.events",
+      "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
+      "graded": true,
+      "checks": "Must record both ablations with drop ≥ 0.25. Hidden baseline must equal 1.0 and mean hidden drop must be ≥ 0.25."
+    }
+  ],
+  "tool_reference": [
+    {
+      "name": "tools",
+      "type": "ExperimentTools",
+      "description": "A helper object passed into solve(...). Use it to measure behavior and inspect or intervene on this challenge model."
+    },
+    {
+      "name": "tools.evaluate(dataset)",
+      "type": "dict[str, float | int]",
+      "description": "Measures task performance across records. Returns accuracy, correct, and total."
+    },
+    {
+      "name": "tools.attention(tokens, layer, head)",
+      "type": "list[list[float]]",
+      "description": "Returns the attention matrix. Row i shows where the query at token position i reads; columns are key positions."
+    },
+    {
+      "name": "tools.ablate_head(tokens, layer, head)",
+      "type": "dict: {type:str, layer:int, head:int, before:float, after:float, drop:float}",
+      "description": "Temporarily zeros one head and measures task accuracy before and after. Records an ablation event; drop is before minus after."
+    },
+    {
+      "name": "tools.ablation_sweep(tokens)",
+      "type": "list[ablation event dict]",
+      "description": "Runs ablate_head on every head for one token sequence, sorted by largest accuracy drop. Pass tokens, e.g. dataset[0][\"tokens\"], not the whole dataset."
+    },
+    {
+      "name": "tools.activation(tokens, name)",
+      "type": "list",
+      "description": "Reads a named activation tensor, such as a residual stream or MLP activation."
+    },
+    {
+      "name": "tools.logit_lens(tokens, layer=None)",
+      "type": "list[list[float]]",
+      "description": "Projects a residual stream through the unembedding to see token scores at a layer."
+    },
+    {
+      "name": "tools.weight(name, layer=None, head=None)",
+      "type": "list",
+      "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
+    }
+  ]
+}

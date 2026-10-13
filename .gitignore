@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+var/
+*.sqlite3
+
+frontend/tsconfig.tsbuildinfo

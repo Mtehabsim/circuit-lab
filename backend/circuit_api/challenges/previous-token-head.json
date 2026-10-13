@@ -1,0 +1,206 @@
+{
+  "id": "previous-token-head",
+  "title": "Find the previous-token head",
+  "difficulty": "Easy",
+  "category": "Foundations",
+  "model": {
+    "name": "prev-token-toy",
+    "layers": 4,
+    "heads": 4,
+    "d_model": 64
+  },
+  "description": "This checkpoint predicts the previous token at every position. Identify the attention head that routes that token into the output, then support your claim with an ablation.",
+  "behavior": "For an input sequence t₀, t₁, …, predict tᵢ₋₁ at every position i > 0.",
+  "metric": "Previous-token accuracy",
+  "examples": [
+    {
+      "input": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E"
+      ],
+      "output": [
+        null,
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "input": [
+        "red",
+        "blue",
+        "gold",
+        "red"
+      ],
+      "output": [
+        null,
+        "red",
+        "blue",
+        "gold"
+      ]
+    }
+  ],
+  "learning_objectives": [
+    "Read an attention pattern",
+    "Measure a model behavior",
+    "Use ablation to test causal importance"
+  ],
+  "tools": [
+    "tools.evaluate(dataset)",
+    "tools.attention(tokens, layer, head)",
+    "tools.ablate_head(tokens, layer, head)",
+    "tools.ablation_sweep(tokens)",
+    "tools.activation(tokens, name)",
+    "tools.logit_lens(tokens, layer=None)",
+    "tools.weight(name, layer=None, head=None)"
+  ],
+  "submission_schema": {
+    "components": [
+      {
+        "type": "attention_head",
+        "layer": "integer",
+        "head": "integer"
+      }
+    ]
+  },
+  "hints": [
+    "Compare attention across several heads.",
+    "Inspect the row for a later sequence position.",
+    "The relevant attention is concentrated on position i−1.",
+    "Ablate your candidate and compare accuracy."
+  ],
+  "public_dataset": [
+    [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
+    ],
+    [
+      "red",
+      "blue",
+      "gold",
+      "red"
+    ],
+    [
+      "7",
+      "2",
+      "9",
+      "4",
+      "1"
+    ],
+    [
+      "oak",
+      "pine",
+      "birch",
+      "oak"
+    ]
+  ],
+  "hidden_dataset": [
+    [
+      "moss",
+      "sand",
+      "clay",
+      "ash",
+      "moss",
+      "salt"
+    ],
+    [
+      "K4",
+      "Q8",
+      "T2",
+      "K4",
+      "P1"
+    ],
+    [
+      "north",
+      "east",
+      "west",
+      "south",
+      "up",
+      "down",
+      "left"
+    ],
+    [
+      "aa",
+      "bb",
+      "cc",
+      "dd",
+      "ee",
+      "ff",
+      "gg",
+      "hh",
+      "ii"
+    ]
+  ],
+  "order": 1,
+  "task_goal": "Find the layer and head that carry the previous token, then demonstrate that ablating it damages the target behavior.",
+  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    # Average each head’s ablation effect across public examples.\n    scores = []\n    for layer in range(model.n_layers):\n        for head in range(model.n_heads):\n            drops = [tools.ablate_head(item[\"tokens\"], layer, head)[\"drop\"] for item in dataset]\n            scores.append((sum(drops) / len(drops), layer, head))\n    _, layer, head = max(scores)\n    print(\"Top candidates:\", sorted(scores, reverse=True)[:5])\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": layer, \"head\": head}]}\n",
+  "schema_version": 1,
+  "example_note": "The first position has no previous token and is excluded from the accuracy metric.",
+  "explanation": {
+    "canonical_solution": "Inspect the proposed mechanism, measure a causal intervention, and confirm it on held-out examples.",
+    "caution": "Attention patterns alone do not establish a causal explanation."
+  },
+  "grading_contract": [
+    {
+      "field": "components",
+      "type": "list[{type: \"attention_head\", layer: int, head: int}]",
+      "graded": true,
+      "checks": "The first component must be {type: \"attention_head\", layer: 2, head: 1}."
+    },
+    {
+      "field": "tools.events",
+      "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
+      "graded": true,
+      "checks": "Must contain an ablation of the submitted head with drop ≥ 0.5. The grader replays it on public and hidden sequences; hidden baseline must be ≥ 0.95 and mean hidden drop ≥ 0.5."
+    }
+  ],
+  "tool_reference": [
+    {
+      "name": "tools",
+      "type": "ExperimentTools",
+      "description": "A helper object passed into solve(...). Use it to measure behavior and inspect or intervene on this challenge model."
+    },
+    {
+      "name": "tools.evaluate(dataset)",
+      "type": "dict[str, float | int]",
+      "description": "Measures task performance across records. Returns accuracy, correct, and total."
+    },
+    {
+      "name": "tools.attention(tokens, layer, head)",
+      "type": "list[list[float]]",
+      "description": "Returns the attention matrix. Row i shows where the query at token position i reads; columns are key positions."
+    },
+    {
+      "name": "tools.ablate_head(tokens, layer, head)",
+      "type": "dict: {type:str, layer:int, head:int, before:float, after:float, drop:float}",
+      "description": "Temporarily zeros one head and measures task accuracy before and after. Records an ablation event; drop is before minus after."
+    },
+    {
+      "name": "tools.ablation_sweep(tokens)",
+      "type": "list[ablation event dict]",
+      "description": "Runs ablate_head on every head for one token sequence, sorted by largest accuracy drop. Pass tokens, e.g. dataset[0][\"tokens\"], not the whole dataset."
+    },
+    {
+      "name": "tools.activation(tokens, name)",
+      "type": "list",
+      "description": "Reads a named activation tensor, such as a residual stream or MLP activation."
+    },
+    {
+      "name": "tools.logit_lens(tokens, layer=None)",
+      "type": "list[list[float]]",
+      "description": "Projects a residual stream through the unembedding to see token scores at a layer."
+    },
+    {
+      "name": "tools.weight(name, layer=None, head=None)",
+      "type": "list",
+      "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
+    }
+  ]
+}

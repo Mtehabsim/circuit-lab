@@ -1,0 +1,204 @@
+{
+  "id": "necessary-or-noise",
+  "title": "Necessary or noise?",
+  "difficulty": "Easy",
+  "category": "Causal verification",
+  "model": {
+    "name": "decoy-head-toy",
+    "layers": 4,
+    "heads": 4,
+    "d_model": 64
+  },
+  "description": "A decoy head has an attention pattern that tracks the previous token, but its output pathway is zeroed. Separate the correlated head from the one that causes the prediction.",
+  "behavior": "Both candidate heads attend to position i−1. Only one head writes the previous token into the residual stream.",
+  "metric": "Previous-token accuracy retained after ablation",
+  "examples": [
+    {
+      "input": [
+        "A",
+        "B",
+        "C",
+        "D",
+        "E"
+      ],
+      "output": [
+        null,
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "input": [
+        "red",
+        "blue",
+        "gold",
+        "red"
+      ],
+      "output": [
+        null,
+        "red",
+        "blue",
+        "gold"
+      ]
+    }
+  ],
+  "learning_objectives": [
+    "Attention can correlate with a behavior without causing it",
+    "Compare candidate ablations against a negative control",
+    "Use held-out sequences to check the causal effect"
+  ],
+  "tools": [
+    "tools.attention(tokens, layer, head)",
+    "tools.ablation_sweep(tokens)",
+    "tools.ablate_head(tokens, layer, head)",
+    "tools.activation(tokens, name)",
+    "tools.logit_lens(tokens, layer=None)",
+    "tools.weight(name, layer=None, head=None)"
+  ],
+  "submission_schema": {
+    "components": [
+      {
+        "type": "attention_head",
+        "layer": "integer",
+        "head": "integer"
+      }
+    ]
+  },
+  "hints": [
+    "Two heads show the same attention pattern. Which one changes the model output when removed?",
+    "Measure each candidate head; the visual pattern alone cannot distinguish them.",
+    "A zero-drop ablation is a useful negative control."
+  ],
+  "public_dataset": [
+    [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
+    ],
+    [
+      "red",
+      "blue",
+      "gold",
+      "red"
+    ],
+    [
+      "7",
+      "2",
+      "9",
+      "4",
+      "1"
+    ],
+    [
+      "oak",
+      "pine",
+      "birch",
+      "oak"
+    ]
+  ],
+  "hidden_dataset": [
+    [
+      "moss",
+      "sand",
+      "clay",
+      "ash",
+      "moss",
+      "salt"
+    ],
+    [
+      "K4",
+      "Q8",
+      "T2",
+      "K4",
+      "P1"
+    ],
+    [
+      "north",
+      "east",
+      "west",
+      "south",
+      "up",
+      "down",
+      "left"
+    ],
+    [
+      "aa",
+      "bb",
+      "cc",
+      "dd",
+      "ee",
+      "ff",
+      "gg",
+      "hh",
+      "ii"
+    ]
+  ],
+  "task_goal": "Ablate the best candidate and the correlated control head. Return the causal head.",
+  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    # Compare the behaviorally relevant head with the correlated control.\n    for item in dataset:\n        tokens = item[\"tokens\"]\n        print(\"Target:\", tools.ablate_head(tokens, 2, 1))\n        print(\"Control:\", tools.ablate_head(tokens, 2, 0))\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": 2, \"head\": 1}]}\n",
+  "order": 2,
+  "schema_version": 1,
+  "example_note": "The first position has no previous token and is excluded from the accuracy metric.",
+  "explanation": {
+    "canonical_solution": "Inspect the proposed mechanism, measure a causal intervention, and confirm it on held-out examples.",
+    "caution": "Attention patterns alone do not establish a causal explanation."
+  },
+  "grading_contract": [
+    {
+      "field": "components",
+      "type": "list[{type: \"attention_head\", layer: int, head: int}]",
+      "graded": true,
+      "checks": "The first component must be the causal head {type: \"attention_head\", layer: 2, head: 1}."
+    },
+    {
+      "field": "tools.events",
+      "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
+      "graded": true,
+      "checks": "Must record target ablation drop ≥ 0.9 and control head (layer 2, head 0) absolute drop < 0.01. The grader replays both checks; hidden behavior is also scored."
+    }
+  ],
+  "tool_reference": [
+    {
+      "name": "tools",
+      "type": "ExperimentTools",
+      "description": "A helper object passed into solve(...). Use it to measure behavior and inspect or intervene on this challenge model."
+    },
+    {
+      "name": "tools.evaluate(dataset)",
+      "type": "dict[str, float | int]",
+      "description": "Measures task performance across records. Returns accuracy, correct, and total."
+    },
+    {
+      "name": "tools.attention(tokens, layer, head)",
+      "type": "list[list[float]]",
+      "description": "Returns the attention matrix. Row i shows where the query at token position i reads; columns are key positions."
+    },
+    {
+      "name": "tools.ablate_head(tokens, layer, head)",
+      "type": "dict: {type:str, layer:int, head:int, before:float, after:float, drop:float}",
+      "description": "Temporarily zeros one head and measures task accuracy before and after. Records an ablation event; drop is before minus after."
+    },
+    {
+      "name": "tools.ablation_sweep(tokens)",
+      "type": "list[ablation event dict]",
+      "description": "Runs ablate_head on every head for one token sequence, sorted by largest accuracy drop. Pass tokens, e.g. dataset[0][\"tokens\"], not the whole dataset."
+    },
+    {
+      "name": "tools.activation(tokens, name)",
+      "type": "list",
+      "description": "Reads a named activation tensor, such as a residual stream or MLP activation."
+    },
+    {
+      "name": "tools.logit_lens(tokens, layer=None)",
+      "type": "list[list[float]]",
+      "description": "Projects a residual stream through the unembedding to see token scores at a layer."
+    },
+    {
+      "name": "tools.weight(name, layer=None, head=None)",
+      "type": "list",
+      "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
+    }
+  ]
+}
