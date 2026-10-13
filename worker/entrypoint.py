@@ -77,6 +77,7 @@ def main() -> None:
         tools = ExperimentTools(model)
         namespace = {
             "model": model, "tokenizer": tokenizer, "dataset": dataset, "tools": tools,
+            "challenge": challenge,
             "torch": torch, "np": np, "plt": plt,
             "behavior_accuracy": behavior_accuracy, "ablation_effect": ablation_effect,
             "plot_attention": plot_attention, "plot_head_heatmap": plot_head_heatmap,

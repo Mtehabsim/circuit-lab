@@ -26,7 +26,7 @@ npm run dev
 
 Open the Vite address shown in the frontend terminal. In the editor, **Run** executes an ordinary Python research script in a fresh process. PyTorch, NumPy, Matplotlib, the model, tokenizer, public dataset, and replayable intervention helpers are available. Figures made by the script appear in run output. Set a `submission` dictionary at top level, or define `solve(model, tokenizer, dataset, tools)`, when you want to submit. Submission is separate from running experiments.
 
-Each run is saved with its code, output, events, and generated figures in the browser session's research journal. Python variables do not persist between runs yet; keep reusable cells in the script and rerun it.
+Each run is saved with its code, output, events, figures, and optional hypothesis/expected-result/notes in the research journal. You can restore a run or compare two runs side by side. Python variables do not persist between runs yet; keep reusable functions in the script and rerun it. A persistent kernel remains a follow-up because it needs stronger session isolation and lifecycle controls.
 
 ## Palindrome checkpoint
 
@@ -39,7 +39,7 @@ cd backend
 uv run python -m circuit_api.train_palindrome --output circuit_api/checkpoints/palindrome-machine.pt
 ```
 
-The API copies the bundled trained checkpoint into its local model cache on first use. The model exposes logits and named activation caches including attention patterns/logits, Q/K/V, head outputs, residual streams, and MLP activations. `tools.ablate_head(...)`, `tools.patch_head_output(...)`, and `tools.patch_residual(...)` record interventions that the grader independently recomputes. Learner-reported numeric values are ignored. Residual patching can localize where a decision is available, but patch recovery alone does not identify the computation that produced it.
+The API copies the bundled trained checkpoint into its local model cache on first use. The model exposes logits and named activation caches including attention patterns/logits, Q/K/V, head outputs, residual streams, and MLP activations. Palindrome now has six sequential milestones: behavior measurement (10), attention statistic (15), bounded causal ablation (15), learner-written QK/OV reconstruction (25), component patching against a matched position control (20), and a hidden comparison against an alternative mechanism (15). A head sweep and successful ablation can earn at most 40/100 across the first three stages. The grader replays metrics; a final-residual patch only localizes the decision. See the [reference investigation](docs/research/PALINDROME_REFERENCE_INVESTIGATION.md) and reproduce its measurements with `cd backend && uv run python ../docs/research/palindrome_experiments.py`.
 
 ## Curriculum and ARENA reference
 

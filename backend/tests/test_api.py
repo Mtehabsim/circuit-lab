@@ -88,30 +88,28 @@ def test_palindrome_mission_runs_and_submits_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "palindrome-flow.sqlite3")
     source = """import matplotlib.pyplot as plt
 
-tokens = dataset[0]["tokens"]
-logits, cache = model.run_with_cache(tokens)
-print("accuracy", tools.evaluate(dataset))
-print("cache tensors", {name: tuple(value.shape) for name, value in cache.items()})
-attn = model.get_attention(tokens, layer=0, head=0)
-plt.imshow(attn.detach().cpu())
-plt.title("Candidate attention pattern")
-plt.show()
+def evaluate_by_length(model, samples):
+    result = {}
+    for row in samples:
+        tokens = row["tokens"]
+        bucket = result.setdefault(len(tokens), {"correct": 0, "total": 0, "accuracy": 0.0})
+        bucket["correct"] += int(int(model(tokens)[-1].argmax()) == model.target_id(tokens))
+        bucket["total"] += 1
+    for bucket in result.values():
+        bucket["accuracy"] = bucket["correct"] / bucket["total"]
+    return result
 
-scores = []
-for layer in range(model.n_layers):
-    for head in range(model.n_heads):
-        drops = [tools.ablate_head(row["tokens"], layer, head)["drop"] for row in dataset]
-        scores.append((sum(drops) / len(drops), layer, head))
-_, layer, head = max(scores)
-submission = {
-    "hypothesis": "A small set of early attention outputs contributes to the palindrome decision; I compared head ablations and checked the strongest candidate.",
-    "components": [{"type": "attention_head", "layer": layer, "head": head}],
-}
+print("Public accuracy:", tools.evaluate(dataset))
+print("Reference mounted:", "explanation" in challenge)
+plt.plot(sorted(evaluate_by_length(model, dataset)))
+plt.show()
+submission = {"hypothesis": "I am characterizing accuracy by length."}
 """
     with TestClient(main.app) as client:
         challenge_list = client.get("/api/challenges").json()
         assert [item["id"] for item in challenge_list] == ["palindrome-machine"]
         challenge = client.get("/api/challenges/palindrome-machine").json()
+        initial_progress = client.get("/api/missions/palindrome-machine/progress", params={"session_id": "palindrome"}).json()
         run = client.post("/api/runs", json={"challenge_id": "palindrome-machine", "session_id": "palindrome", "source": source})
         assert run.status_code == 200 and run.json()["status"] == "complete", run.text
         assert run.json()["artifacts"]
@@ -120,9 +118,29 @@ submission = {
         journal = client.get("/api/sessions/palindrome/runs").json()
 
     assert grade.status_code == 200, grade.text
-    assert grade.json()["score"] >= 70
-    assert grade.json()["checks"]["hidden_baseline_accuracy"] >= 0.95
-    assert grade.json()["checks"]["replayable_public_intervention"]
-    assert grade.json()["explanation"]["canonical_solution"]
+    assert initial_progress["next_milestone_id"] == "behavior"
+    assert grade.json()["passed"] and grade.json()["score"] == 10
+    assert grade.json()["progress"]["next_milestone_id"] == "attention"
+    assert "explanation" not in grade.json()
     assert journal[0]["source"] == source
     assert journal[0]["result"]["artifacts"]
+    assert "Reference mounted: False" in journal[0]["result"]["stdout"]
+
+
+def test_palindrome_unlocks_milestones_and_reveals_solution_only_by_choice(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "palindrome-unlock.sqlite3")
+    with TestClient(main.app) as client:
+        run = client.post("/api/runs", json={"challenge_id": "palindrome-machine", "session_id": "learner", "source": "submission = {}"}).json()
+        locked_attempt = client.post("/api/submissions", json={"run_id": run["run_id"], "session_id": "learner", "milestone_id": "mechanism"})
+        progress_before = client.get("/api/missions/palindrome-machine/progress", params={"session_id": "learner"}).json()
+        early_reveal = client.post("/api/missions/palindrome-machine/reveal", json={"session_id": "learner"}).json()
+        progress_after = client.get("/api/missions/palindrome-machine/progress", params={"session_id": "learner"}).json()
+        challenge = client.get("/api/challenges/palindrome-machine").json()
+
+    assert locked_attempt.status_code == 409
+    assert progress_before["next_milestone_id"] == "behavior"
+    assert progress_before["milestones"][0]["unlocked"]
+    assert early_reveal["explanation"]["canonical_solution"]
+    assert progress_after["status"] == "solution_revealed"
+    assert progress_after["completed_independently"] is False
+    assert "explanation" not in challenge

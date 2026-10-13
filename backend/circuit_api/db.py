@@ -49,6 +49,23 @@ def initialize() -> None:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (session_id, challenge_id)
             );
+            CREATE TABLE IF NOT EXISTS mission_milestones (
+                session_id TEXT NOT NULL,
+                challenge_id TEXT NOT NULL,
+                milestone_id TEXT NOT NULL,
+                passed INTEGER NOT NULL DEFAULT 0,
+                points INTEGER NOT NULL DEFAULT 0,
+                grade_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, challenge_id, milestone_id)
+            );
+            CREATE TABLE IF NOT EXISTS revealed_solutions (
+                session_id TEXT NOT NULL,
+                challenge_id TEXT NOT NULL,
+                revealed INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (session_id, challenge_id)
+            );
             CREATE INDEX IF NOT EXISTS runs_by_session ON runs(session_id, created_at);
             CREATE INDEX IF NOT EXISTS submissions_by_session ON submissions(session_id, created_at);
             """
@@ -123,6 +140,56 @@ def save_submission(
             "INSERT INTO submissions (id, run_id, challenge_id, session_id, claim_json, score, feedback_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (submission_id, run_id, challenge_id, session_id, json.dumps(claim), score, json.dumps(feedback)),
         )
+
+
+def save_milestone_result(session_id: str, challenge_id: str, milestone_id: str, grade: dict[str, Any]) -> None:
+    with connect() as db:
+        db.execute(
+            "INSERT INTO mission_milestones (session_id, challenge_id, milestone_id, passed, points, grade_json) "
+            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, challenge_id, milestone_id) DO UPDATE SET "
+            "passed = MAX(mission_milestones.passed, excluded.passed), "
+            "points = MAX(mission_milestones.points, excluded.points), grade_json = excluded.grade_json, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (session_id, challenge_id, milestone_id, int(bool(grade.get("passed"))),
+             int(grade.get("earned_points", 0)), json.dumps(grade)),
+        )
+
+
+def attach_grade_to_run(run_id: str, grade: dict[str, Any], milestone_id: str | None) -> None:
+    run = get_run(run_id)
+    if run is None or not isinstance(run.get("result"), dict):
+        return
+    result = run["result"]
+    result["grade"] = grade
+    result["graded_milestone"] = milestone_id
+    finish_run(run_id, run["status"], result)
+
+
+def get_mission_milestones(session_id: str, challenge_id: str) -> dict[str, dict[str, Any]]:
+    with connect() as db:
+        rows = db.execute(
+            "SELECT milestone_id, passed, points, grade_json, updated_at FROM mission_milestones "
+            "WHERE session_id = ? AND challenge_id = ?", (session_id, challenge_id),
+        ).fetchall()
+    return {row["milestone_id"]: {"passed": bool(row["passed"]), "points": row["points"],
+                                  "grade": json.loads(row["grade_json"]), "updated_at": row["updated_at"]}
+            for row in rows}
+
+
+def reveal_solution(session_id: str, challenge_id: str) -> None:
+    with connect() as db:
+        db.execute(
+            "INSERT INTO revealed_solutions (session_id, challenge_id, revealed) VALUES (?, ?, 1) "
+            "ON CONFLICT(session_id, challenge_id) DO UPDATE SET revealed = 1, updated_at = CURRENT_TIMESTAMP",
+            (session_id, challenge_id),
+        )
+
+
+def has_revealed_solution(session_id: str, challenge_id: str) -> bool:
+    with connect() as db:
+        row = db.execute("SELECT revealed FROM revealed_solutions WHERE session_id = ? AND challenge_id = ?",
+                         (session_id, challenge_id)).fetchone()
+    return bool(row[0]) if row else False
 
 
 def list_submissions(session_id: str) -> list[dict[str, Any]]:

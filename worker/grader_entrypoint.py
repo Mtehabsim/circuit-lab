@@ -29,7 +29,9 @@ def main() -> None:
             raise ValueError("unknown challenge grader")
         result["grade"] = grader(
             payload["claim"], payload["run_result"], payload["public_dataset"], payload["hidden_dataset"],
-            os.environ.get("CIRCUIT_CHECKPOINT", "/models/previous-token.pt")
+            os.environ.get("CIRCUIT_CHECKPOINT", "/models/previous-token.pt"),
+            **({"milestone_id": payload.get("milestone_id", "behavior"), "source": payload.get("source", "")}
+               if payload.get("challenge_id") == "palindrome-machine" else {})
         )
     except BaseException as error:
         result = {"result_version": 1, "error": f"{type(error).__name__}: {error}", "traceback": traceback.format_exc(limit=8)}

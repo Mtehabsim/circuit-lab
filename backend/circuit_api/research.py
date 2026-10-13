@@ -12,7 +12,7 @@ import torch
 from .model import SequenceTokenizer
 
 
-def behavior_accuracy(model: Any, dataset: list[dict[str, Any]], *, ablate=None) -> float:
+def behavior_accuracy(model: Any, dataset: list[dict[str, Any]], *, ablate=None, ablate_mlp=None) -> float:
     """Measure the checkpoint's task metric without using the experiment recorder."""
     correct = total = 0
     with torch.inference_mode():
@@ -26,7 +26,7 @@ def behavior_accuracy(model: Any, dataset: list[dict[str, Any]], *, ablate=None)
                 total += 1
             elif getattr(model, "behavior", None) == "palindrome":
                 expected = model.target_id(tokens)
-                correct += int(model(tokens, ablate=ablate)[-1].argmax()) == expected
+                correct += int(model(tokens, ablate=ablate, ablate_mlp=ablate_mlp)[-1].argmax()) == expected
                 total += 1
             elif len(tokens) >= 2:
                 predicted = model(tokens, ablate=ablate).argmax(dim=-1).tolist()
@@ -34,6 +34,38 @@ def behavior_accuracy(model: Any, dataset: list[dict[str, Any]], *, ablate=None)
                 correct += sum(predicted[pos] == ids[pos - 1] for pos in range(1, len(tokens)))
                 total += len(tokens) - 1
     return correct / total if total else 0.0
+
+
+def evaluate_by_length(model: Any, dataset: list[dict[str, Any]]) -> dict[int, dict[str, float | int]]:
+    """Reference task summary used by private replay; learners implement their own version."""
+    result: dict[int, dict[str, float | int]] = {}
+    for row in dataset:
+        tokens = row["tokens"]
+        bucket = result.setdefault(len(tokens), {"correct": 0, "total": 0, "accuracy": 0.0})
+        bucket["correct"] = int(bucket["correct"]) + int(int(model(tokens)[-1].argmax()) == model.target_id(tokens))
+        bucket["total"] = int(bucket["total"]) + 1
+    for bucket in result.values():
+        bucket["accuracy"] = int(bucket["correct"]) / max(1, int(bucket["total"]))
+    return result
+
+
+def mirrored_attention_mass(attention: torch.Tensor, content_length: int) -> torch.Tensor:
+    """Mean attention mass on causally visible mirrored content positions, excluding BOS/EOS."""
+    if attention.ndim != 2 or attention.shape[0] < content_length + 2:
+        raise ValueError("attention must be a square matrix including BOS and EOS")
+    values = [attention[q, content_length + 1 - q] for q in range(1, content_length + 1)
+              if content_length + 1 - q <= q]
+    return torch.stack(values).mean() if values else attention.new_zeros(())
+
+
+def reconstruct_qk_logits(query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+    """Scaled dot-product logits before causal masking, from raw Q and K tensors."""
+    return query @ key.transpose(-1, -2) / (query.shape[-1] ** 0.5)
+
+
+def reconstruct_ov_output(attention: torch.Tensor, values: torch.Tensor, output_weight: torch.Tensor) -> torch.Tensor:
+    """Per-head attention output from its pattern, V activations, and W_O."""
+    return attention @ values @ output_weight
 
 
 def ablation_effect(model: Any, dataset: list[dict[str, Any]], layer: int, head: int,

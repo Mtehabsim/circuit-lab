@@ -227,168 +227,134 @@ def grade_ioi(
 
 def grade_palindrome(
     claim: dict[str, Any], run_result: dict[str, Any], public_dataset: list[list[str]],
-    hidden_dataset: list[list[str]], checkpoint_path: str,
+    hidden_dataset: list[list[str]], checkpoint_path: str, *, milestone_id: str = "behavior",
+    source: str = "",
 ) -> dict[str, Any]:
-    """Score independently replayed causal effects; component IDs are never answer-key matched."""
+    """Grade one research milestone; point weights sum to the mission's 100-point total."""
     from .palindrome import load_checkpoint as load_palindrome_checkpoint
+    from .palindrome_research import _candidate, _make_patch_pairs, _patch_margin, evaluate_learner_research
     network = load_palindrome_checkpoint(checkpoint_path)
-    public = [{"tokens": tokens} for tokens in public_dataset]
-    hidden = [{"tokens": tokens} for tokens in hidden_dataset]
-    components = claim.get("components", []) if isinstance(claim, dict) else []
-    selected: list[tuple[int, int]] = []
-    for item in components if isinstance(components, list) else []:
-        if not isinstance(item, dict) or item.get("type", "attention_head") != "attention_head":
-            continue
-        layer, head = item.get("layer"), item.get("head")
-        if isinstance(layer, int) and isinstance(head, int) and 0 <= layer < network.n_layers and 0 <= head < network.n_heads:
-            pair = (layer, head)
-            if pair not in selected:
-                selected.append(pair)
-    selected = selected[:4]
-    residual_locations: list[tuple[int, int]] = []
-    raw_locations = claim.get("residual_locations", []) if isinstance(claim, dict) else []
-    for item in raw_locations if isinstance(raw_locations, list) else []:
-        if not isinstance(item, dict):
-            continue
-        layer, position = item.get("layer"), item.get("position")
-        if isinstance(layer, int) and isinstance(position, int) and 0 <= layer < network.n_layers and position >= -1:
-            location = (layer, position)
-            if location not in residual_locations:
-                residual_locations.append(location)
-    residual_locations = residual_locations[:4]
-    intervention_count = len(selected) + len(residual_locations)
-    baseline_public = behavior_accuracy(network, public)
-    baseline_hidden = behavior_accuracy(network, hidden)
-    selected_set = set(selected)
-    after_public = behavior_accuracy(network, public, ablate=selected_set) if selected else baseline_public
-    after_hidden = behavior_accuracy(network, hidden, ablate=selected_set) if selected else baseline_hidden
-    public_drop = baseline_public - after_public
-    hidden_drop = baseline_hidden - after_hidden
+    weights = {"behavior": 10, "attention": 15, "causality": 15, "mechanism": 25,
+               "information_flow": 20, "defend": 15}
+    if milestone_id not in weights:
+        return {"score": 0, "passed": False, "milestone_id": milestone_id,
+                "feedback": ["Unknown research milestone."]}
+    stage = evaluate_learner_research(source, milestone_id, network, hidden_dataset, claim)
+    checks = stage.get("checks", {})
+    candidate = _candidate(claim)
+    feedback: list[str] = []
+    earned = 0
+    if milestone_id == "behavior":
+        earned = weights[milestone_id] if checks.get("evaluate_by_length", {}).get("passed") else 0
+        feedback.append("Your length-stratified evaluation matches private replay, including correct counts and the empty-input case." if earned else checks.get("evaluate_by_length", {}).get("error", "Implement evaluate_by_length(model, samples) and return correct, total, and accuracy for each length."))
+    elif milestone_id == "attention":
+        earned = weights[milestone_id] if checks.get("mirrored_attention_mass", {}).get("passed") else 0
+        feedback.append("Your attention statistic matches raw cached tensors across private heads and sequences. This verifies the measurement, not a causal mechanism." if earned else checks.get("mirrored_attention_mass", {}).get("error", "Implement mirrored_attention_mass(attention, content_length) from the raw attention matrix."))
+    elif milestone_id == "causality":
+        components = claim.get("components", []) if isinstance(claim, dict) else []
+        unique = []
+        for item in components if isinstance(components, list) else []:
+            if isinstance(item, dict) and _valid_palindrome_component(item) and item not in unique:
+                unique.append(item)
+        events = [event for event in run_result.get("events", []) if isinstance(event, dict)]
+        public_keys = {tuple(row) for row in public_dataset}
+        event_ok = any(_event_matches_component(event, component) and isinstance(event.get("tokens"), list)
+                       and tuple(event["tokens"]) in public_keys for event in events for component in unique)
+        baseline = behavior_accuracy(network, [{"tokens": row} for row in hidden_dataset])
+        effect = 0.0
+        if unique and len(unique) <= 2:
+            head_set = {(item["layer"], item["head"]) for item in unique if item["type"] == "attention_head"}
+            mlp_set = {item["layer"] for item in unique if item["type"] == "mlp"}
+            after = behavior_accuracy(network, [{"tokens": row} for row in hidden_dataset],
+                                      ablate=head_set, ablate_mlp=mlp_set)
+            effect = baseline - after
+        valid = bool(event_ok and len(unique) in (1, 2) and effect >= 0.08)
+        earned = weights[milestone_id] if valid else (5 if event_ok else 0)
+        feedback.append(f"Independent hidden replay measures a {effect:.1%} accuracy decrease from the proposed component set." if valid else "A recorded ablation is only candidate evidence. Keep the circuit to at most two components and establish a reproducible hidden effect before advancing.")
+        checks.update(candidate_ablation_recorded=event_ok, hidden_accuracy_drop=effect,
+                      hidden_baseline_accuracy=baseline, component_count=len(unique),
+                      comparison_label="effect relative to matched component interventions; not task specificity")
+    elif milestone_id == "mechanism":
+        evidence = checks.get("tensor_reconstruction", {})
+        earned = weights[milestone_id] if evidence.get("passed") else round(weights[milestone_id] * min(1, (evidence.get("qk_passed", 0) + evidence.get("ov_passed", 0)) / 50))
+        feedback.append("Your QK and OV tensor calculations match independent replay on real and synthetic inputs." if earned == weights[milestone_id] else evidence.get("error", "Reconstruct both scaled QK logits and pattern @ V @ W_O using the provided raw tensors."))
+    elif milestone_id == "information_flow":
+        evidence = checks.get("patch_experiment", {})
+        effect_gap = evidence.get("mean_absolute_target_change", 0) - evidence.get("mean_absolute_control_change", 0)
+        localized = evidence.get("passed") and effect_gap > 1.5
+        earned = weights[milestone_id] if localized else (8 if evidence.get("passed") else 0)
+        feedback.append(f"Your patch experiment matches private replay; target-site margin movement exceeds the causal-position control by {effect_gap:.2f} logits. This localizes a contribution without asserting the full algorithm." if localized else evidence.get("error", "Compare a clean patch at the changed token with the same component patched at its causally earlier mirrored control position."))
+        checks["target_vs_control_margin_gap"] = effect_gap
+        checks["causal_position_control"] = localized
+    elif milestone_id == "defend":
+        evidence = checks.get("patch_experiment", {})
+        prediction = claim.get("prediction", {}) if isinstance(claim, dict) else {}
+        alternative = claim.get("alternative_component") if isinstance(claim, dict) else None
+        pairs = _make_patch_pairs(network, hidden_dataset, count=32)
+        alt_valid = _valid_palindrome_component(alternative) if alternative else False
+        candidate = candidate or _first_component(claim)
+        comparison = _compare_patch_hypotheses(network, pairs, candidate, alternative) if candidate and alt_valid else {}
+        relation = prediction.get("candidate_vs_alternative") if isinstance(prediction, dict) else None
+        restoration = prediction.get("candidate_restoration") if isinstance(prediction, dict) else None
+        relation_ok = relation == comparison.get("observed_relation")
+        restoration_ok = restoration == comparison.get("observed_restoration")
+        text_ok = bool(isinstance(claim.get("hypothesis"), str) and len(claim["hypothesis"].strip()) >= 20
+                       and isinstance(claim.get("alternative_hypothesis"), str)
+                       and len(claim["alternative_hypothesis"].strip()) >= 20)
+        complete = bool(evidence.get("passed") and alt_valid and relation_ok and restoration_ok and text_ok)
+        earned = weights[milestone_id] if complete else (5 if evidence.get("passed") and comparison else 0)
+        feedback.append("Your predicted target/control and candidate/alternative relations match fresh held-out patch replay." if complete else "State a competing mechanism and predict how the candidate compares with it on hidden matched patch/control pairs; free-text explanation is retained but not judged as scientific ground truth.")
+        checks.update(candidate_alternative_patch_comparison=comparison,
+                      predicted_candidate_relation=relation, relation_supported=relation_ok,
+                      restoration_prediction=restoration, restoration_supported=restoration_ok,
+                      qualitative_claim_recorded=text_ok)
+    passed = earned == weights[milestone_id]
+    feedback.append("The milestone verifies the stated measurement or intervention contract; it does not certify a unique or complete prose explanation.")
+    return {"score": earned, "earned_points": earned, "possible_points": weights[milestone_id],
+            "milestone_score": round(100 * earned / weights[milestone_id]),
+            "milestone_id": milestone_id, "passed": passed, "checks": checks, "feedback": feedback}
 
-    # Compare against same-sized random component sets, to estimate whether the
-    # claimed intervention is selective rather than just a broad model knockout.
-    all_components = [(layer, head) for layer in range(network.n_layers) for head in range(network.n_heads)]
-    controls = [pair for pair in all_components if pair not in selected_set]
-    control_drops = []
-    for pair in controls:
-        after = behavior_accuracy(network, hidden, ablate={pair})
-        control_drops.append(max(0.0, baseline_hidden - after))
-    control_mean = sum(control_drops) / max(1, len(control_drops))
-    specificity = max(0.0, min(1.0, (max(0.0, hidden_drop) - control_mean) / max(max(0.0, hidden_drop), 0.05)))
 
-    # Events are only evidence that the learner ran an intervention. Their
-    # numeric values are discarded; the grader recomputes on fresh checkpoints/data.
-    public_keys = {tuple(tokens) for tokens in public_dataset}
-    events = [event for event in run_result.get("events", []) if isinstance(event, dict)]
-    replayed_ablation = any(
-        event.get("type") == "ablation"
-        and (event.get("layer"), event.get("head")) in selected_set
-        and isinstance(event.get("tokens"), list)
-        and tuple(event["tokens"]) in public_keys
-        for event in events
-    )
-    patch_events = [event for event in events if event.get("type") in {"activation_patch", "residual_patch"}]
-    public_patch_recovery = 0.0
-    patch_event_valid = False
-    for event in patch_events:
-        pair = (event.get("layer"), event.get("head"))
-        location = (event.get("layer"), event.get("position"))
-        event_type = event.get("type")
-        clean, corrupted, position = event.get("clean_tokens"), event.get("corrupted_tokens"), event.get("position")
-        supported = pair in selected_set if event_type == "activation_patch" else location in residual_locations
-        if not supported or not isinstance(clean, list) or not isinstance(corrupted, list):
-            continue
-        valid_position = (
-            isinstance(position, int)
-            and (0 <= position < len(clean) if event_type == "activation_patch" else position == -1 or 0 <= position < len(clean) + 2)
-        )
-        if tuple(clean) not in public_keys or not valid_position:
-            continue
-        if len(clean) != len(corrupted) or clean == corrupted or network.target_id(clean) != 1 or network.target_id(corrupted) != 0:
-            continue
-        replay_tools = ExperimentTools(network)
-        replay = (replay_tools.patch_head_output(clean, corrupted, pair[0], pair[1], position)
-                  if event_type == "activation_patch"
-                  else replay_tools.patch_residual(clean, corrupted, location[0], location[1]))
-        clean_margin = replay["clean_logit_difference"]
-        corrupt_margin = replay["corrupted_logit_difference"]
-        patched_margin = replay["patched_logit_difference"]
-        if clean_margin > 0 and corrupt_margin < 0:
-            patch_event_valid = True
-            public_patch_recovery = float(patched_margin > 0)
-            break
+def _valid_palindrome_component(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") == "attention_head":
+        return isinstance(item.get("layer"), int) and 0 <= item["layer"] < 3 and isinstance(item.get("head"), int) and 0 <= item["head"] < 4
+    return item.get("type") == "mlp" and isinstance(item.get("layer"), int) and 0 <= item["layer"] < 3
 
-    # Construct held-out near-miss pairs by changing the terminal symbol of
-    # hidden positive examples. Replay the same candidate head/position patch.
-    patch_rates = []
-    for pair in selected:
-        restored = attempted = 0
-        for clean in hidden_dataset:
-            if network.target_id(clean) != 1:
-                continue
-            corrupted = list(clean)
-            corrupted[-1] = next(symbol for symbol in network.vocab[:8] if symbol != corrupted[-1])
-            result = ExperimentTools(network).patch_head_output(clean, corrupted, pair[0], pair[1], len(clean) - 1)
-            attempted += 1
-            restored += int(result["clean_logit_difference"] > 0 and result["corrupted_logit_difference"] < 0 and result["patched_logit_difference"] > 0)
-        if attempted:
-            patch_rates.append(restored / attempted)
-    for layer, position in residual_locations:
-        restored = attempted = 0
-        for clean in hidden_dataset:
-            if network.target_id(clean) != 1:
-                continue
-            corrupted = list(clean)
-            corrupted[-1] = next(symbol for symbol in network.vocab[:8] if symbol != corrupted[-1])
-            try:
-                result = ExperimentTools(network).patch_residual(clean, corrupted, layer, position)
-            except ValueError:
-                continue
-            attempted += 1
-            restored += int(result["clean_logit_difference"] > 0 and result["corrupted_logit_difference"] < 0 and result["patched_logit_difference"] > 0)
-        if attempted:
-            patch_rates.append(restored / attempted)
-    hidden_patch_recovery = max(patch_rates, default=0.0)
-    replayable_event = replayed_ablation or patch_event_valid
-    causal_effect = max(max(0.0, hidden_drop / 0.60), hidden_patch_recovery)
-    generalization = max(
-        max(0.0, min(1.0, hidden_drop / max(public_drop, 0.05))),
-        max(0.0, min(1.0, hidden_patch_recovery / max(public_patch_recovery, 0.25))),
-    )
-    size_score = max(0.0, 1.0 - max(0, intervention_count - 1) / 3)
-    dimensions = {
-        "causal_effect": round(35 * min(1.0, causal_effect)),
-        "hidden_generalization": round(25 * generalization),
-        "specificity_vs_other_heads": round(20 * specificity),
-        "reproducible_intervention": 10 if replayable_event else 0,
-        "intervention_size": round(10 * size_score) if selected else 0,
-    }
-    feedback = []
-    if not selected:
-        feedback.append("Name the component or small circuit you want the grader to test.")
-    elif hidden_drop < 0.05 and hidden_patch_recovery < 0.05:
-        feedback.append("The proposed intervention has little effect on the hidden task distribution. Revisit the hypothesis or test another intervention.")
-    elif hidden_drop >= 0.05:
-        feedback.append(f"Independent replay reduces hidden accuracy by {hidden_drop:.1%}; the effect is measured on fresh inputs, not from submitted numbers.")
-    else:
-        feedback.append(f"Independent clean-to-corrupted patching restores the target margin on {hidden_patch_recovery:.1%} of hidden near-misses.")
-    if not replayable_event:
-        feedback.append("Record a proposed ablation or clean-to-corrupted patch with the tools API; the grader ignores reported scores and replays the intervention.")
-    if selected and specificity < 0.25:
-        feedback.append("The effect is not clearly selective relative to other single-head ablations. Test a narrower component or compare matched controls.")
-    if baseline_hidden < 0.9:
-        feedback.append("The checkpoint is imperfect on these hidden inputs, so interpret intervention effects only over the model's supported behavior distribution.")
-    feedback.append("This score validates behavioral intervention evidence, not the uniqueness or completeness of a prose mechanism.")
-    score = sum(dimensions.values())
-    if intervention_count > 2:
-        score = min(score, 55)
-    return {"score": score, "dimensions": dimensions,
-            "checks": {"public_baseline_accuracy": baseline_public, "hidden_baseline_accuracy": baseline_hidden,
-                       "public_intervened_accuracy": after_public, "hidden_intervened_accuracy": after_hidden,
-                       "public_accuracy_drop": public_drop, "hidden_accuracy_drop": hidden_drop,
-                       "mean_single_control_head_drop": control_mean, "replayable_public_intervention": replayable_event,
-                       "public_patch_recovery": public_patch_recovery, "hidden_patch_recovery": hidden_patch_recovery,
-                       "component_count": intervention_count, "residual_location_count": len(residual_locations)}, "feedback": feedback}
+
+def _event_matches_component(event: dict[str, Any], component: dict[str, Any]) -> bool:
+    if component["type"] == "attention_head":
+        return event.get("type") == "ablation" and event.get("layer") == component["layer"] and event.get("head") == component["head"]
+    return event.get("type") == "mlp_ablation" and event.get("layer") == component["layer"]
+
+
+def _first_component(claim: dict[str, Any]) -> dict[str, Any] | None:
+    values = claim.get("components", []) if isinstance(claim, dict) else []
+    return values[0] if values and _valid_palindrome_component(values[0]) else None
+
+
+def _compare_patch_hypotheses(network, pairs, candidate, alternative):
+    from .palindrome_research import _patch_margin
+    if not candidate or not alternative or not pairs:
+        return {}
+    effects, alt_effects, restored = [], [], []
+    for clean, corrupted, changed, _ in pairs:
+        baseline = float(network(corrupted)[-1, 1] - network(corrupted)[-1, 0])
+        candidate_margin = _patch_margin(network, clean, corrupted, candidate, changed)
+        alternative_margin = _patch_margin(network, clean, corrupted, alternative, changed)
+        effects.append(abs(candidate_margin - baseline))
+        alt_effects.append(abs(alternative_margin - baseline))
+        restored.append(candidate_margin > 0)
+    candidate_effect, alternative_effect = sum(effects)/len(effects), sum(alt_effects)/len(alt_effects)
+    relation = "greater" if candidate_effect > alternative_effect + 1.5 else "less" if alternative_effect > candidate_effect + 1.5 else "similar"
+    restoration_rate = sum(restored)/len(restored)
+    restoration = "rare" if restoration_rate < 0.25 else "common" if restoration_rate > 0.70 else "mixed"
+    return {"candidate_mean_absolute_margin_change": candidate_effect,
+            "alternative_mean_absolute_margin_change": alternative_effect,
+            "candidate_restoration_rate": restoration_rate,
+            "observed_relation": relation, "observed_restoration": restoration,
+            "n_matched_pairs": len(pairs)}
 
 
 def _valid_component(component: Any) -> bool:

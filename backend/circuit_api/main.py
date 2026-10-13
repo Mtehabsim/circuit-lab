@@ -38,11 +38,16 @@ class RunRequest(BaseModel):
 class SubmitRequest(BaseModel):
     run_id: str = Field(min_length=1, max_length=80)
     session_id: str = Field(min_length=1, max_length=80)
+    milestone_id: str | None = Field(default=None, max_length=80)
 
 
 class DraftRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=80)
     source: str = Field(max_length=100_000)
+
+
+class RevealRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=80)
 
 
 @app.get("/api/health")
@@ -61,6 +66,46 @@ def challenge(challenge_id: str) -> dict[str, Any]:
     if item is None:
         raise HTTPException(404, "Challenge not found")
     return {key: value for key, value in item.items() if key not in {"hidden_dataset", "explanation"}}
+
+
+def _mission_progress(session_id: str, challenge_data: dict[str, Any]) -> dict[str, Any]:
+    states = db.get_mission_milestones(session_id, challenge_data["id"])
+    milestones = challenge_data.get("milestones", [])
+    next_id = next((item["id"] for item in milestones if not states.get(item["id"], {}).get("passed")), None)
+    completed = bool(milestones) and all(states.get(item["id"], {}).get("passed") for item in milestones)
+    revealed = db.has_revealed_solution(session_id, challenge_data["id"])
+    unlocked = []
+    previous_passed = True
+    for item in milestones:
+        unlocked.append({"id": item["id"], "passed": bool(states.get(item["id"], {}).get("passed")),
+                         "unlocked": previous_passed,
+                         "points": states.get(item["id"], {}).get("points", 0)})
+        previous_passed = previous_passed and bool(states.get(item["id"], {}).get("passed"))
+    return {"milestones": unlocked,
+            "earned_points": sum(item["points"] for item in unlocked),
+            "possible_points": 100,
+            "next_milestone_id": next_id,
+            "completed_independently": completed and not revealed,
+            "solution_revealed": revealed,
+            "status": "solution_revealed" if revealed else "completed" if completed else "in_progress"}
+
+
+@app.get("/api/missions/{challenge_id}/progress")
+def mission_progress(challenge_id: str, session_id: str) -> dict[str, Any]:
+    item = get_challenge(challenge_id)
+    if item is None:
+        raise HTTPException(404, "Challenge not found")
+    return _mission_progress(session_id, item)
+
+
+@app.post("/api/missions/{challenge_id}/reveal")
+def reveal_mission_solution(challenge_id: str, request: RevealRequest) -> dict[str, Any]:
+    item = get_challenge(challenge_id)
+    if item is None:
+        raise HTTPException(404, "Challenge not found")
+    db.reveal_solution(request.session_id, challenge_id)
+    return {"progress": _mission_progress(request.session_id, item),
+            "explanation": item.get("explanation")}
 
 
 @app.post("/api/runs")
@@ -105,7 +150,13 @@ def submit(request: SubmitRequest) -> dict[str, Any]:
         raise HTTPException(404, "Challenge not found")
     claim = run["result"].get("submission")
     if not isinstance(claim, dict):
-        raise HTTPException(422, "solve(...) must return a submission dictionary")
+        claim = {}
+    milestone_id = request.milestone_id
+    if run["challenge_id"] == "palindrome-machine":
+        progress_before = _mission_progress(request.session_id, challenge_data)
+        milestone_id = milestone_id or progress_before["next_milestone_id"]
+        if milestone_id != progress_before["next_milestone_id"]:
+            raise HTTPException(409, "Complete the currently unlocked research milestone first")
     try:
         payload = {
             "challenge_id": run["challenge_id"],
@@ -114,13 +165,26 @@ def submit(request: SubmitRequest) -> dict[str, Any]:
             "run_result": run["result"],
             "public_dataset": challenge_data["public_dataset"],
             "hidden_dataset": challenge_data["hidden_dataset"],
+            "source": run["source"],
+            "milestone_id": milestone_id,
         }
         grade = run_grade(payload)
     except RunnerUnavailable as error:
         raise HTTPException(503, str(error)) from error
     submission_id = uuid.uuid4().hex
     db.save_submission(submission_id, run["id"], run["challenge_id"], request.session_id, claim, grade["score"], grade)
-    return {"submission_id": submission_id, **grade, "explanation": challenge_data.get("explanation")}
+    if run["challenge_id"] == "palindrome-machine":
+        db.attach_grade_to_run(run["id"], grade, milestone_id)
+    response = {"submission_id": submission_id, **grade}
+    if run["challenge_id"] == "palindrome-machine":
+        db.save_milestone_result(request.session_id, run["challenge_id"], milestone_id or "", grade)
+        progress_after = _mission_progress(request.session_id, challenge_data)
+        response["progress"] = progress_after
+        if progress_after["completed_independently"] or progress_after["solution_revealed"]:
+            response["explanation"] = challenge_data.get("explanation")
+    else:
+        response["explanation"] = challenge_data.get("explanation")
+    return response
 
 
 @app.get("/api/sessions/{session_id}/submissions")

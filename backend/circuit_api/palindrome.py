@@ -107,7 +107,10 @@ class PalindromeTransformer(nn.Module):
         final_positions = lengths - 1
         return self.unembed(x[torch.arange(len(encoded), device=device), final_positions])
 
-    def run_with_trace(self, tokens: Sequence[str], *, ablate: Any = None, patch=None):
+    def run_with_trace(
+        self, tokens: Sequence[str], *, ablate: Any = None, patch=None,
+        ablate_mlp: int | Sequence[int] | None = None, patch_mlp=None,
+    ):
         ids = self.encode(tokens)
         x = self.embedding(ids) + self.position(torch.arange(len(ids), device=ids.device))
         residuals = [x]
@@ -135,6 +138,13 @@ class PalindromeTransformer(nn.Module):
             x = residual + attn_update
             mlp_post = F.gelu(self.ln_mlp[layer](x) @ self.mlp_in[layer])
             mlp_out = mlp_post @ self.mlp_out[layer]
+            mlp_layers = {ablate_mlp} if isinstance(ablate_mlp, int) else set(ablate_mlp or ())
+            if layer in mlp_layers:
+                mlp_out = torch.zeros_like(mlp_out)
+            if patch_mlp is not None and patch_mlp[0] == layer:
+                _, position, replacement = patch_mlp
+                mlp_out = mlp_out.clone()
+                mlp_out[position] = replacement
             x = x + mlp_out
             if isinstance(patch, dict) and patch.get("type") == "residual" and patch.get("layer") == layer:
                 position = int(patch["position"])
@@ -150,8 +160,8 @@ class PalindromeTransformer(nn.Module):
             "head_values": torch.stack(v_all), "head_outputs": torch.stack(outputs),
             "mlp_activations": torch.stack(mlp_acts), "mlp_outputs": torch.stack(mlp_outputs)})()
 
-    def forward(self, tokens: Sequence[str], *, ablate=None) -> Tensor:
-        return self.run_with_trace(tokens, ablate=ablate).logits
+    def forward(self, tokens: Sequence[str], *, ablate=None, ablate_mlp=None) -> Tensor:
+        return self.run_with_trace(tokens, ablate=ablate, ablate_mlp=ablate_mlp).logits
 
 
 def generate_examples(count: int, seed: int, lengths=range(3, 13)) -> list[tuple[list[str], int]]:

@@ -145,6 +145,43 @@ class ExperimentTools:
         ], "before": before, "after": after, "drop": before - after, "n_examples": len(dataset)}
         return self._record(event)
 
+    def ablate_mlp(self, tokens: Sequence[str], layer: int) -> dict[str, Any]:
+        if getattr(self.model, "behavior", None) != "palindrome":
+            raise ValueError("MLP interventions are currently enabled for the Palindrome Machine")
+        if not isinstance(layer, int) or not 0 <= layer < self.model.n_layers:
+            raise ValueError(f"layer must be an integer from 0 to {self.model.n_layers - 1}")
+        one = [{"tokens": list(tokens)}]
+        before = self._accuracy(self.model, one)
+        with torch.inference_mode():
+            expected = self.model.target_id(tokens)
+            after = float(int(self.model(tokens, ablate_mlp=layer)[-1].argmax()) == expected)
+        return self._record({"type": "mlp_ablation", "layer": layer, "tokens": list(tokens),
+                             "before": before, "after": after, "drop": before - after})
+
+    def patch_mlp_output(
+        self, clean_tokens: Sequence[str], corrupted_tokens: Sequence[str], layer: int, position: int
+    ) -> dict[str, Any]:
+        if getattr(self.model, "behavior", None) != "palindrome":
+            raise ValueError("MLP-output patching is currently enabled for the Palindrome Machine")
+        if len(clean_tokens) != len(corrupted_tokens) or not 0 <= layer < self.model.n_layers:
+            raise ValueError("clean/corrupted inputs must have equal lengths and layer must be valid")
+        internal_position = len(clean_tokens) + 1 if position == -1 else position
+        if not isinstance(position, int) or not 0 <= internal_position < len(clean_tokens) + 2:
+            raise ValueError("position must be a content/internal token index or -1 for final EOS")
+        with torch.inference_mode():
+            clean = self.model.run_with_trace(clean_tokens)
+            corrupted = self.model.run_with_trace(corrupted_tokens)
+            patch = self.model.run_with_trace(corrupted_tokens, patch_mlp=(layer, internal_position,
+                                                                          clean.mlp_outputs[layer, internal_position]))
+            target = self.model.target_id(clean_tokens)
+            clean_margin = float(clean.logits[-1, target] - clean.logits[-1, 1-target])
+            corrupted_margin = float(corrupted.logits[-1, target] - corrupted.logits[-1, 1-target])
+            patched_margin = float(patch.logits[-1, target] - patch.logits[-1, 1-target])
+        return self._record({"type": "mlp_patch", "layer": layer, "position": position,
+                             "clean_tokens": list(clean_tokens), "corrupted_tokens": list(corrupted_tokens),
+                             "clean_logit_difference": clean_margin, "corrupted_logit_difference": corrupted_margin,
+                             "patched_logit_difference": patched_margin, "recovery": patched_margin-corrupted_margin})
+
     def value_path(self, tokens: Sequence[str], layer: int, head: int, position: int) -> dict[str, Any]:
         self._validate_component(layer, head)
         if not isinstance(position, int) or not 1 <= position < len(tokens):

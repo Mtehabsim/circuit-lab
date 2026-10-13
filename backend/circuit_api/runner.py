@@ -36,7 +36,10 @@ def run_code(source: str, challenge_id: str, challenge_data: dict[str, Any]) -> 
         job_dir = Path(temp_dir)
         source_path = job_dir / "solution.py"
         source_path.write_text(source, encoding="utf-8")
-        public_challenge = {key: value for key, value in challenge_data.items() if key != "hidden_dataset"}
+        # Reference material and hidden examples are server-side data. The local
+        # worker is not a security sandbox, but avoid mounting either by default.
+        public_challenge = {key: value for key, value in challenge_data.items()
+                            if key not in {"hidden_dataset", "explanation"}}
         (job_dir / "challenge.json").write_text(json.dumps(public_challenge), encoding="utf-8")
         env = _worker_environment(job_dir, checkpoint)
         env["CIRCUIT_CHALLENGE"] = challenge_id

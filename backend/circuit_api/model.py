@@ -44,11 +44,16 @@ class ModelAdapter(nn.Module):
             aliases = {"W_Q": "q_proj", "W_K": "k_proj", "W_V": "v_proj", "W_O": "o_proj"}
             return getattr(inner, aliases.get(name, name))
 
-    def forward(self, tokens: Sequence[str], *, ablate=None) -> Tensor:
+    def forward(self, tokens: Sequence[str], *, ablate=None, ablate_mlp=None) -> Tensor:
+        if getattr(self.inner, "behavior", None) == "palindrome":
+            return self.inner(tokens, ablate=ablate, ablate_mlp=ablate_mlp)
         return self.inner(tokens, ablate=ablate)
 
-    def run_with_trace(self, tokens: Sequence[str], *, ablate=None, patch=None) -> RunTrace:
-        return self.inner.run_with_trace(tokens, ablate=ablate, patch=patch)
+    def run_with_trace(self, tokens: Sequence[str], *, ablate=None, patch=None, ablate_mlp=None, patch_mlp=None) -> RunTrace:
+        options = {"ablate": ablate, "patch": patch}
+        if getattr(self.inner, "behavior", None) == "palindrome":
+            options.update(ablate_mlp=ablate_mlp, patch_mlp=patch_mlp)
+        return self.inner.run_with_trace(tokens, **options)
 
     def run(self, prompt: Sequence[str] | str) -> Tensor:
         return self(prompt.split() if isinstance(prompt, str) else prompt)
@@ -56,7 +61,7 @@ class ModelAdapter(nn.Module):
     def run_with_cache(self, prompt: Sequence[str] | str, *, ablate=None) -> tuple[Tensor, dict[str, Tensor]]:
         tokens = prompt.split() if isinstance(prompt, str) else prompt
         trace = self.run_with_trace(tokens, ablate=ablate)
-        return trace.logits, self.activation_cache(tokens, ablate=ablate)
+        return trace.logits, self.activation_cache(tokens, ablate=ablate, trace=trace)
 
     def get_logits(self, prompt: Sequence[str] | str) -> Tensor:
         return self.run(prompt)
@@ -92,8 +97,8 @@ class ModelAdapter(nn.Module):
         name = "resid.final" if layer is None else f"blocks.{layer}.resid.post"
         return self.activation(tokens, name)
 
-    def activation_cache(self, tokens: Sequence[str], *, ablate=None) -> dict[str, Tensor]:
-        trace = self.run_with_trace(tokens, ablate=ablate)
+    def activation_cache(self, tokens: Sequence[str], *, ablate=None, trace: RunTrace | None = None) -> dict[str, Tensor]:
+        trace = trace if trace is not None else self.run_with_trace(tokens, ablate=ablate)
         cache = {"logits": trace.logits, "resid.final": trace.residual}
         for layer in range(self.n_layers):
             cache[f"blocks.{layer}.attn.pattern"] = trace.attention[layer]
