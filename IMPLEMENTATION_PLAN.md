@@ -34,6 +34,7 @@ Deliver a local, usable MVP where a learner opens a challenge, writes Python exp
 - [x] Install dependencies, compile the frontend, and run API/model tests (20 passed; frontend production build passes).
 - [x] Declare NumPy and PyTorch as runtime dependencies and refresh the lockfile so a normal local setup has NumPy available to PyTorch.
 - [x] Show per-challenge submission field types and deterministic grading checks, explain which fields are not graded, and document direct PyTorch model calls beside the experiment helpers.
+- [x] Remove ungraded prose/evidence fields from all six submission contracts and starter solutions; verify each starter receives 100/100 from hidden grading.
 - [x] Run all six reference challenges through FastAPI, the local worker, SQLite, and hidden grading (all score 100/100).
 
 **Environment note:** Dependencies are installed. The selected local subprocess runner does not require Docker.
