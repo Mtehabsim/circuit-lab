@@ -199,5 +199,6 @@
       "type": "list",
       "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
     }
-  ]
+  ],
+  "status": "archived"
 }

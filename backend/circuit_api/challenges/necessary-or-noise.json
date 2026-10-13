@@ -10,7 +10,7 @@
     "d_model": 64
   },
   "description": "A decoy head has an attention pattern that tracks the previous token, but its output pathway is zeroed. Separate the correlated head from the one that causes the prediction.",
-  "behavior": "Both candidate heads attend to position i−1. Only one head writes the previous token into the residual stream.",
+  "behavior": "Both candidate heads attend to position i\u22121. Only one head writes the previous token into the residual stream.",
   "metric": "Previous-token accuracy retained after ablation",
   "examples": [
     {
@@ -156,7 +156,7 @@
       "field": "tools.events",
       "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
       "graded": true,
-      "checks": "Must record target ablation drop ≥ 0.9 and control head (layer 2, head 0) absolute drop < 0.01. The grader replays both checks; hidden behavior is also scored."
+      "checks": "Must record target ablation drop \u2265 0.9 and control head (layer 2, head 0) absolute drop < 0.01. The grader replays both checks; hidden behavior is also scored."
     }
   ],
   "tool_reference": [
@@ -200,5 +200,6 @@
       "type": "list",
       "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
     }
-  ]
+  ],
+  "status": "archived"
 }

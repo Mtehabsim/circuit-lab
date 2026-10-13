@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 TIME_LIMIT_SECONDS = int(os.environ.get("CIRCUIT_RUN_TIMEOUT", "20"))
 OUTPUT_LIMIT_BYTES = 1_000_000
-CHECKPOINT_REVISION = 2
+CHECKPOINT_REVISION = 3
 
 
 class RunnerUnavailable(RuntimeError):
@@ -82,6 +83,17 @@ def _ensure_checkpoint(model_name: str) -> Path:
                 "ov-path-toy": build_checkpoint, "patching-toy": build_checkpoint,
                 "induction-toy": build_induction_checkpoint, "ioi-toy": build_ioi_checkpoint}
     builder = builders.get(model_name)
+    if model_name == "palindrome-trained":
+        packaged = BACKEND / "circuit_api" / "checkpoints" / "palindrome-machine.pt"
+        if packaged.is_file():
+            shutil.copy2(packaged, checkpoint)
+            provenance = packaged.with_suffix(".provenance.json")
+            if provenance.is_file():
+                shutil.copy2(provenance, checkpoint.with_suffix(".provenance.json"))
+            return checkpoint
+        from .palindrome import train_checkpoint
+        train_checkpoint(str(checkpoint), epochs=80, examples=10_000)
+        return checkpoint
     if builder is None:
         raise RunnerUnavailable(f"No checkpoint builder is registered for {model_name}.")
     builder(str(checkpoint))

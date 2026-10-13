@@ -18,9 +18,10 @@ def test_challenge_endpoint_never_sends_hidden_examples(tmp_path, monkeypatch):
 def test_all_versioned_challenges_validate_and_list_in_curriculum_order():
     challenges = validate_challenges()
 
-    assert len(challenges) == 6
-    assert [item["order"] for item in challenges] == [1, 2, 3, 4, 5, 6]
+    assert len(challenges) == 7
+    assert [item["order"] for item in challenges] == sorted(item["order"] for item in challenges)
     assert all(item["schema_version"] == 1 for item in challenges)
+    assert [item["id"] for item in challenges if item["status"] == "active"] == ["palindrome-machine"]
     assert get_challenge("../pyproject") is None
 
 
@@ -83,22 +84,45 @@ def test_drafts_are_saved_per_session_and_challenge(tmp_path, monkeypatch):
     assert other_session.json()["source"] is None
 
 
-def test_all_six_challenges_run_and_submit_end_to_end(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "full-flow.sqlite3")
-    solutions = {
-        "previous-token-head": '''def solve(model, tokenizer, dataset, tools):\n    tokens=dataset[0]["tokens"]\n    best=tools.ablation_sweep(tokens)[0]\n    event=tools.ablate_head(tokens,best["layer"],best["head"])\n    return {"hypothesis":"The head copies the previous token.","components":[{"type":"attention_head","layer":best["layer"],"head":best["head"]}],"evidence":[event]}\n''',
-        "necessary-or-noise": '''def solve(model, tokenizer, dataset, tools):\n    tokens=dataset[0]["tokens"]\n    tools.ablation_sweep(tokens)\n    tools.ablate_head(tokens,2,1)\n    tools.ablate_head(tokens,2,0)\n    return {"hypothesis":"Only the target head writes to the residual stream.","components":[{"type":"attention_head","layer":2,"head":1}],"evidence":[]}\n''',
-    }
+def test_palindrome_mission_runs_and_submits_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "palindrome-flow.sqlite3")
+    source = """import matplotlib.pyplot as plt
+
+tokens = dataset[0]["tokens"]
+logits, cache = model.run_with_cache(tokens)
+print("accuracy", tools.evaluate(dataset))
+print("cache tensors", {name: tuple(value.shape) for name, value in cache.items()})
+attn = model.get_attention(tokens, layer=0, head=0)
+plt.imshow(attn.detach().cpu())
+plt.title("Candidate attention pattern")
+plt.show()
+
+scores = []
+for layer in range(model.n_layers):
+    for head in range(model.n_heads):
+        drops = [tools.ablate_head(row["tokens"], layer, head)["drop"] for row in dataset]
+        scores.append((sum(drops) / len(drops), layer, head))
+_, layer, head = max(scores)
+submission = {
+    "hypothesis": "A small set of early attention outputs contributes to the palindrome decision; I compared head ablations and checked the strongest candidate.",
+    "components": [{"type": "attention_head", "layer": layer, "head": head}],
+}
+"""
     with TestClient(main.app) as client:
         challenge_list = client.get("/api/challenges").json()
-        assert len(challenge_list) == 6
-        for item in challenge_list:
-            challenge = client.get(f"/api/challenges/{item['id']}").json()
-            source = solutions.get(item["id"], challenge["starter_code"])
-            run = client.post("/api/runs", json={"challenge_id": item["id"], "session_id": "all-six", "source": source})
-            assert run.status_code == 200 and run.json()["status"] == "complete", (item["id"], run.text)
-            grade = client.post("/api/submissions", json={"run_id": run.json()["run_id"], "session_id": "all-six"})
-            assert grade.status_code == 200 and grade.json()["score"] == 100, (item["id"], grade.text)
-            assert grade.json()["explanation"]["canonical_solution"]
-        assert len(client.get("/api/sessions/all-six/runs").json()) == 6
-        assert len(client.get("/api/sessions/all-six/submissions").json()) == 6
+        assert [item["id"] for item in challenge_list] == ["palindrome-machine"]
+        challenge = client.get("/api/challenges/palindrome-machine").json()
+        run = client.post("/api/runs", json={"challenge_id": "palindrome-machine", "session_id": "palindrome", "source": source})
+        assert run.status_code == 200 and run.json()["status"] == "complete", run.text
+        assert run.json()["artifacts"]
+        run_id = run.json()["run_id"]
+        grade = client.post("/api/submissions", json={"run_id": run_id, "session_id": "palindrome"})
+        journal = client.get("/api/sessions/palindrome/runs").json()
+
+    assert grade.status_code == 200, grade.text
+    assert grade.json()["score"] >= 70
+    assert grade.json()["checks"]["hidden_baseline_accuracy"] >= 0.95
+    assert grade.json()["checks"]["replayable_public_intervention"]
+    assert grade.json()["explanation"]["canonical_solution"]
+    assert journal[0]["source"] == source
+    assert journal[0]["result"]["artifacts"]

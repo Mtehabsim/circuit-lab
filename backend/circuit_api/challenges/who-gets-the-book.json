@@ -181,7 +181,7 @@
       "field": "tools.events",
       "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
       "graded": true,
-      "checks": "Must record both ablations with drop ≥ 0.25. Hidden baseline must equal 1.0 and mean hidden drop must be ≥ 0.25."
+      "checks": "Must record both ablations with drop \u2265 0.25. Hidden baseline must equal 1.0 and mean hidden drop must be \u2265 0.25."
     }
   ],
   "tool_reference": [
@@ -225,5 +225,6 @@
       "type": "list",
       "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
     }
-  ]
+  ],
+  "status": "archived"
 }

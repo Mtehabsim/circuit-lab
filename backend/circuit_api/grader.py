@@ -4,6 +4,7 @@ from typing import Any
 
 from .model import load_checkpoint, load_induction_checkpoint, load_ioi_checkpoint
 from .tools import ExperimentTools
+from .research import behavior_accuracy
 
 
 GROUND_TRUTH = {"type": "attention_head", "layer": 2, "head": 1}
@@ -222,6 +223,172 @@ def grade_ioi(
                 "Both proposed heads have measured causal effects." if causal else "Ablate each proposed head and record its effect on the IOI answer.",
                 "The circuit generalizes to unseen name pairs." if generalizes else "The proposed circuit did not pass the held-out name-pair tests.",
             ]}
+
+
+def grade_palindrome(
+    claim: dict[str, Any], run_result: dict[str, Any], public_dataset: list[list[str]],
+    hidden_dataset: list[list[str]], checkpoint_path: str,
+) -> dict[str, Any]:
+    """Score independently replayed causal effects; component IDs are never answer-key matched."""
+    from .palindrome import load_checkpoint as load_palindrome_checkpoint
+    network = load_palindrome_checkpoint(checkpoint_path)
+    public = [{"tokens": tokens} for tokens in public_dataset]
+    hidden = [{"tokens": tokens} for tokens in hidden_dataset]
+    components = claim.get("components", []) if isinstance(claim, dict) else []
+    selected: list[tuple[int, int]] = []
+    for item in components if isinstance(components, list) else []:
+        if not isinstance(item, dict) or item.get("type", "attention_head") != "attention_head":
+            continue
+        layer, head = item.get("layer"), item.get("head")
+        if isinstance(layer, int) and isinstance(head, int) and 0 <= layer < network.n_layers and 0 <= head < network.n_heads:
+            pair = (layer, head)
+            if pair not in selected:
+                selected.append(pair)
+    selected = selected[:4]
+    residual_locations: list[tuple[int, int]] = []
+    raw_locations = claim.get("residual_locations", []) if isinstance(claim, dict) else []
+    for item in raw_locations if isinstance(raw_locations, list) else []:
+        if not isinstance(item, dict):
+            continue
+        layer, position = item.get("layer"), item.get("position")
+        if isinstance(layer, int) and isinstance(position, int) and 0 <= layer < network.n_layers and position >= -1:
+            location = (layer, position)
+            if location not in residual_locations:
+                residual_locations.append(location)
+    residual_locations = residual_locations[:4]
+    intervention_count = len(selected) + len(residual_locations)
+    baseline_public = behavior_accuracy(network, public)
+    baseline_hidden = behavior_accuracy(network, hidden)
+    selected_set = set(selected)
+    after_public = behavior_accuracy(network, public, ablate=selected_set) if selected else baseline_public
+    after_hidden = behavior_accuracy(network, hidden, ablate=selected_set) if selected else baseline_hidden
+    public_drop = baseline_public - after_public
+    hidden_drop = baseline_hidden - after_hidden
+
+    # Compare against same-sized random component sets, to estimate whether the
+    # claimed intervention is selective rather than just a broad model knockout.
+    all_components = [(layer, head) for layer in range(network.n_layers) for head in range(network.n_heads)]
+    controls = [pair for pair in all_components if pair not in selected_set]
+    control_drops = []
+    for pair in controls:
+        after = behavior_accuracy(network, hidden, ablate={pair})
+        control_drops.append(max(0.0, baseline_hidden - after))
+    control_mean = sum(control_drops) / max(1, len(control_drops))
+    specificity = max(0.0, min(1.0, (max(0.0, hidden_drop) - control_mean) / max(max(0.0, hidden_drop), 0.05)))
+
+    # Events are only evidence that the learner ran an intervention. Their
+    # numeric values are discarded; the grader recomputes on fresh checkpoints/data.
+    public_keys = {tuple(tokens) for tokens in public_dataset}
+    events = [event for event in run_result.get("events", []) if isinstance(event, dict)]
+    replayed_ablation = any(
+        event.get("type") == "ablation"
+        and (event.get("layer"), event.get("head")) in selected_set
+        and isinstance(event.get("tokens"), list)
+        and tuple(event["tokens"]) in public_keys
+        for event in events
+    )
+    patch_events = [event for event in events if event.get("type") in {"activation_patch", "residual_patch"}]
+    public_patch_recovery = 0.0
+    patch_event_valid = False
+    for event in patch_events:
+        pair = (event.get("layer"), event.get("head"))
+        location = (event.get("layer"), event.get("position"))
+        event_type = event.get("type")
+        clean, corrupted, position = event.get("clean_tokens"), event.get("corrupted_tokens"), event.get("position")
+        supported = pair in selected_set if event_type == "activation_patch" else location in residual_locations
+        if not supported or not isinstance(clean, list) or not isinstance(corrupted, list):
+            continue
+        valid_position = (
+            isinstance(position, int)
+            and (0 <= position < len(clean) if event_type == "activation_patch" else position == -1 or 0 <= position < len(clean) + 2)
+        )
+        if tuple(clean) not in public_keys or not valid_position:
+            continue
+        if len(clean) != len(corrupted) or clean == corrupted or network.target_id(clean) != 1 or network.target_id(corrupted) != 0:
+            continue
+        replay_tools = ExperimentTools(network)
+        replay = (replay_tools.patch_head_output(clean, corrupted, pair[0], pair[1], position)
+                  if event_type == "activation_patch"
+                  else replay_tools.patch_residual(clean, corrupted, location[0], location[1]))
+        clean_margin = replay["clean_logit_difference"]
+        corrupt_margin = replay["corrupted_logit_difference"]
+        patched_margin = replay["patched_logit_difference"]
+        if clean_margin > 0 and corrupt_margin < 0:
+            patch_event_valid = True
+            public_patch_recovery = float(patched_margin > 0)
+            break
+
+    # Construct held-out near-miss pairs by changing the terminal symbol of
+    # hidden positive examples. Replay the same candidate head/position patch.
+    patch_rates = []
+    for pair in selected:
+        restored = attempted = 0
+        for clean in hidden_dataset:
+            if network.target_id(clean) != 1:
+                continue
+            corrupted = list(clean)
+            corrupted[-1] = next(symbol for symbol in network.vocab[:8] if symbol != corrupted[-1])
+            result = ExperimentTools(network).patch_head_output(clean, corrupted, pair[0], pair[1], len(clean) - 1)
+            attempted += 1
+            restored += int(result["clean_logit_difference"] > 0 and result["corrupted_logit_difference"] < 0 and result["patched_logit_difference"] > 0)
+        if attempted:
+            patch_rates.append(restored / attempted)
+    for layer, position in residual_locations:
+        restored = attempted = 0
+        for clean in hidden_dataset:
+            if network.target_id(clean) != 1:
+                continue
+            corrupted = list(clean)
+            corrupted[-1] = next(symbol for symbol in network.vocab[:8] if symbol != corrupted[-1])
+            try:
+                result = ExperimentTools(network).patch_residual(clean, corrupted, layer, position)
+            except ValueError:
+                continue
+            attempted += 1
+            restored += int(result["clean_logit_difference"] > 0 and result["corrupted_logit_difference"] < 0 and result["patched_logit_difference"] > 0)
+        if attempted:
+            patch_rates.append(restored / attempted)
+    hidden_patch_recovery = max(patch_rates, default=0.0)
+    replayable_event = replayed_ablation or patch_event_valid
+    causal_effect = max(max(0.0, hidden_drop / 0.60), hidden_patch_recovery)
+    generalization = max(
+        max(0.0, min(1.0, hidden_drop / max(public_drop, 0.05))),
+        max(0.0, min(1.0, hidden_patch_recovery / max(public_patch_recovery, 0.25))),
+    )
+    size_score = max(0.0, 1.0 - max(0, intervention_count - 1) / 3)
+    dimensions = {
+        "causal_effect": round(35 * min(1.0, causal_effect)),
+        "hidden_generalization": round(25 * generalization),
+        "specificity_vs_other_heads": round(20 * specificity),
+        "reproducible_intervention": 10 if replayable_event else 0,
+        "intervention_size": round(10 * size_score) if selected else 0,
+    }
+    feedback = []
+    if not selected:
+        feedback.append("Name the component or small circuit you want the grader to test.")
+    elif hidden_drop < 0.05 and hidden_patch_recovery < 0.05:
+        feedback.append("The proposed intervention has little effect on the hidden task distribution. Revisit the hypothesis or test another intervention.")
+    elif hidden_drop >= 0.05:
+        feedback.append(f"Independent replay reduces hidden accuracy by {hidden_drop:.1%}; the effect is measured on fresh inputs, not from submitted numbers.")
+    else:
+        feedback.append(f"Independent clean-to-corrupted patching restores the target margin on {hidden_patch_recovery:.1%} of hidden near-misses.")
+    if not replayable_event:
+        feedback.append("Record a proposed ablation or clean-to-corrupted patch with the tools API; the grader ignores reported scores and replays the intervention.")
+    if selected and specificity < 0.25:
+        feedback.append("The effect is not clearly selective relative to other single-head ablations. Test a narrower component or compare matched controls.")
+    if baseline_hidden < 0.9:
+        feedback.append("The checkpoint is imperfect on these hidden inputs, so interpret intervention effects only over the model's supported behavior distribution.")
+    feedback.append("This score validates behavioral intervention evidence, not the uniqueness or completeness of a prose mechanism.")
+    score = sum(dimensions.values())
+    if intervention_count > 2:
+        score = min(score, 55)
+    return {"score": score, "dimensions": dimensions,
+            "checks": {"public_baseline_accuracy": baseline_public, "hidden_baseline_accuracy": baseline_hidden,
+                       "public_intervened_accuracy": after_public, "hidden_intervened_accuracy": after_hidden,
+                       "public_accuracy_drop": public_drop, "hidden_accuracy_drop": hidden_drop,
+                       "mean_single_control_head_drop": control_mean, "replayable_public_intervention": replayable_event,
+                       "public_patch_recovery": public_patch_recovery, "hidden_patch_recovery": hidden_patch_recovery,
+                       "component_count": intervention_count, "residual_location_count": len(residual_locations)}, "feedback": feedback}
 
 
 def _valid_component(component: Any) -> bool:

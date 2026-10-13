@@ -1,0 +1,76 @@
+{
+  "seed": 1729,
+  "training_data_seed": 1730,
+  "validation_data_seed": 1732,
+  "epochs": 80,
+  "training_examples": 10000,
+  "batch_size": 256,
+  "optimizer": "AdamW",
+  "learning_rate": 0.003,
+  "weight_decay": 0.01,
+  "gradient_clip_norm": 1.0,
+  "validation_examples": 1000,
+  "validation_accuracy": 0.989,
+  "train_accuracy_sample": 0.998,
+  "alphabet": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H"
+  ],
+  "max_content_length": 16,
+  "training_content_lengths": [
+    3,
+    12
+  ],
+  "architecture": {
+    "layers": 3,
+    "heads": 4,
+    "d_model": 48,
+    "head_dim": 12,
+    "mlp_width": 96,
+    "position_embedding": "learned absolute",
+    "attention": "causal scaled dot-product",
+    "normalization": "pre-attention and pre-MLP LayerNorm",
+    "mlp_activation": "GELU",
+    "classifier": "final-position linear binary head"
+  },
+  "asset_source": "CircuitLab-generated synthetic training data and random initialization; no external checkpoint or dataset",
+  "negative_sampling": {
+    "hard_single_mirrored_mismatch_fraction": 0.5,
+    "random_negative_fraction": 0.5,
+    "hard_mismatch_offset": "uniform over mirrored pairs"
+  },
+  "accuracy_by_length_200_examples": {
+    "3": 1.0,
+    "4": 0.98,
+    "5": 0.99,
+    "6": 0.99,
+    "7": 0.99,
+    "8": 1.0,
+    "9": 0.995,
+    "10": 0.99,
+    "11": 0.98,
+    "12": 0.985,
+    "13": 0.62,
+    "14": 0.49,
+    "15": 0.495,
+    "16": 0.51
+  },
+  "near_miss_accuracy_by_mirrored_offset": {
+    "0": 1.0,
+    "1": 1.0,
+    "2": 0.989,
+    "3": 0.98,
+    "4": 0.987,
+    "5": 0.9
+  },
+  "near_miss_evaluation": {
+    "examples_per_supported_length_offset": 50,
+    "offset_rule": "left-side index from the edge; only distinct mirrored token pairs"
+  }
+}

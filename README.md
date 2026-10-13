@@ -1,12 +1,14 @@
-# Circuit
+# CircuitLab
 
-LeetCode-style mechanistic interpretability challenges. The MVP uses a React/TypeScript/Vite client, a FastAPI service, SQLite attempt storage, small PyTorch checkpoints, and local Python worker processes.
+CircuitLab is a code-first mechanistic interpretability research lab. A mission gives the learner a trained model and asks them to write Python experiments, inspect activations, test interventions, and submit a measurable causal claim.
 
-## Local setup
+The current active mission, **The Palindrome Machine**, investigates an independently trained transformer classifier. The older hand-constructed toy challenges remain in the repository as archived examples and are not shown in the mission list.
+
+## Run locally
 
 Requirements: Node.js 20+, Python 3.11+, and `uv`.
 
-Start the API in a terminal:
+Start the API:
 
 ```sh
 cd backend
@@ -22,20 +24,31 @@ npm install
 npm run dev
 ```
 
-Open the Vite address shown in the frontend terminal. The page uses the Vite `/api` proxy to connect to FastAPI. Run the starter code, use the experiment helpers to record interventions, return the required structured component claim, and select **Submit** to grade it on held-out sequences.
+Open the Vite address shown in the frontend terminal. In the editor, **Run** executes an ordinary Python research script in a fresh process. PyTorch, NumPy, Matplotlib, the model, tokenizer, public dataset, and replayable intervention helpers are available. Figures made by the script appear in run output. Set a `submission` dictionary at top level, or define `solve(model, tokenizer, dataset, tools)`, when you want to submit. Submission is separate from running experiments.
 
-## Challenge entry point
+Each run is saved with its code, output, events, and generated figures in the browser session's research journal. Python variables do not persist between runs yet; keep reusable cells in the script and rerun it.
 
-Each run invokes `solve(model, tokenizer, dataset, tools)` in a fresh local Python subprocess. The process has a time limit and bounded captured output; the grader runs in a separate subprocess and replays the claimed intervention against held-out examples.
+## Palindrome checkpoint
 
-The first challenge's target circuit is a deterministic PyTorch checkpoint. The grader process evaluates held-out data. Local execution is intended for a trusted, single-user development environment: learner Python runs with the same operating-system permissions as the app, so it can inspect local files and hidden tests are not secret from the machine owner. `backend/tests/` covers behavior, attention, interventions, and grading.
+The checkpoint was trained from scratch on independently generated palindrome and non-palindrome sequences. Its training code, fixed seed/configuration, weights, and validation provenance are in `backend/circuit_api/palindrome.py` and `backend/circuit_api/checkpoints/`. It achieves 98.9% on the seeded generated validation sample, 100% on the fixed public sample, and 97.9% on the fixed hidden sample (lengths 3–12). An OOD probe at lengths 13–16 is about 50%, so those lengths are outside its supported range.
 
-## Challenges and experiment tools
+Regenerate the checkpoint with:
 
-The six challenge definitions are versioned JSON files under `backend/circuit_api/challenges/`. The current curriculum includes previous-token localization, causal ablation with a correlated decoy, an OV/value-path trace, a two-head induction circuit, clean-to-corrupted activation patching, and an IOI-style name-mover circuit. Each definition includes public and held-out examples, starter code, hints, submission schema, and an explanation. The API validates challenge versions and progression order at startup.
+```sh
+cd backend
+uv run python -m circuit_api.train_palindrome --output circuit_api/checkpoints/palindrome-machine.pt
+```
 
-The shared `ModelAdapter` and `tools` object expose behavior evaluation, named residual/Q/K/V/attention/logit activations, logit-lens reads, head ablation and sweeps, value/output contribution tracing, and head-output activation patching. Submissions are graded by challenge-specific code that replays intervention checks on held-out examples. SQLite keeps drafts, recent runs, and submissions associated with a browser-local anonymous session.
+The API copies the bundled trained checkpoint into its local model cache on first use. The model exposes logits and named activation caches including attention patterns/logits, Q/K/V, head outputs, residual streams, and MLP activations. `tools.ablate_head(...)`, `tools.patch_head_output(...)`, and `tools.patch_residual(...)` record interventions that the grader independently recomputes. Learner-reported numeric values are ignored. Residual patching can localize where a decision is available, but patch recovery alone does not identify the computation that produced it.
 
-This is a local research/learning MVP, not a public code-execution service. Learner Python runs as the current OS user and can read or change local files. The worker has timeout and output caps, but it is not a security sandbox. Do not expose it to untrusted users without adding an OS-level sandbox.
+## Curriculum and ARENA reference
 
-Authentication, profiles, payments, and social features are out of scope.
+`docs/ARENA_SKILL_COVERAGE.md` maps ARENA's seven public Monthly Algorithmic Problems to future CircuitLab skills and verification. CircuitLab borrows the task category and educational inspiration, but distributes original challenge wording, generated data, model training code, checkpoints, tests, and research walkthroughs. It does not bundle ARENA notebooks, solutions, datasets, or pretrained checkpoints. Review ARENA's [materials-use policy](https://www.arena.education/using-our-materials) before organizing a program based on its materials; organizations are asked to request permission.
+
+`docs/MIGRATION_PLAN.md` records the repository audit, completed work, remaining milestones, and release limits.
+
+## Execution limits
+
+The local worker and grader run in separate subprocesses with time and output bounds. This is a trusted, single-user development setup, not a security sandbox. Learner Python runs with the app user's permissions and can inspect local files, including hidden test files. Do not expose the current worker to untrusted users without an OS/container sandbox, filesystem and network restrictions, dependency controls, and concurrency limits.
+
+Run backend tests with `cd backend && uv run pytest`; build the frontend with `cd frontend && npm run build`.

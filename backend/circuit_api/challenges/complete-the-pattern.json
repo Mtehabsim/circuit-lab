@@ -12,7 +12,7 @@
   },
   "description": "A tiny transformer predicts the continuation associated with a repeated token. Find the two-head circuit that writes previous-token identity and uses it to retrieve the matching continuation.",
   "behavior": "At the final position, the model finds an earlier occurrence whose previous token matches the current token, then predicts the token that followed that occurrence.",
-  "task_goal": "Identify both stages of the induction circuit, inspect the second head’s attention, and ablate both heads to establish causal involvement.",
+  "task_goal": "Identify both stages of the induction circuit, inspect the second head\u2019s attention, and ablate both heads to establish causal involvement.",
   "metric": "Induction completion accuracy",
   "examples": [
     {
@@ -155,7 +155,7 @@
       "field": "tools.events",
       "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
       "graded": true,
-      "checks": "Must record both head ablations with drop > 0.5. Hidden baseline must be ≥ 0.95 and mean hidden drop ≥ 0.5."
+      "checks": "Must record both head ablations with drop > 0.5. Hidden baseline must be \u2265 0.95 and mean hidden drop \u2265 0.5."
     }
   ],
   "tool_reference": [
@@ -199,5 +199,6 @@
       "type": "list",
       "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
     }
-  ]
+  ],
+  "status": "archived"
 }

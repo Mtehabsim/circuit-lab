@@ -81,11 +81,11 @@ def get_run(run_id: str) -> dict[str, Any] | None:
 def list_runs(session_id: str) -> list[dict[str, Any]]:
     with connect() as db:
         rows = db.execute(
-            "SELECT id, challenge_id, status, result_json, created_at FROM runs WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 100",
+            "SELECT id, challenge_id, status, source, result_json, created_at FROM runs WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 100",
             (session_id,),
         ).fetchall()
     return [
-        {"run_id": row["id"], "challenge_id": row["challenge_id"], "status": row["status"],
+        {"run_id": row["id"], "challenge_id": row["challenge_id"], "status": row["status"], "source": row["source"],
          "result": json.loads(row["result_json"]) if row["result_json"] else None, "created_at": row["created_at"]}
         for row in rows
     ]

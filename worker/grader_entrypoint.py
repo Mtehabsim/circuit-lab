@@ -5,7 +5,7 @@ import os
 import traceback
 from pathlib import Path
 
-from circuit_api.grader import grade_ablation_control, grade_activation_patch, grade_induction, grade_ioi, grade_previous_token, grade_value_path
+from circuit_api.grader import grade_ablation_control, grade_activation_patch, grade_induction, grade_ioi, grade_palindrome, grade_previous_token, grade_value_path
 
 
 GRADERS = {
@@ -15,6 +15,7 @@ GRADERS = {
     "find-the-signal": grade_activation_patch,
     "complete-the-pattern": grade_induction,
     "who-gets-the-book": grade_ioi,
+    "palindrome-machine": grade_palindrome,
 }
 
 

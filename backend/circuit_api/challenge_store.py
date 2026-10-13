@@ -28,6 +28,7 @@ class ChallengeDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1]
     id: str = Field(min_length=1, max_length=80)
+    status: Literal["active", "archived"] = "active"
     order: int = Field(gt=0)
     title: str
     difficulty: Literal["Easy", "Medium", "Hard"]
@@ -36,6 +37,7 @@ class ChallengeDefinition(BaseModel):
     description: str
     behavior: str
     task_goal: str
+    milestones: list[dict[str, Any]] = Field(default_factory=list)
     metric: str
     examples: list[PublicExample]
     example_note: str
@@ -85,5 +87,5 @@ def list_challenges() -> list[dict[str, Any]]:
         {key: challenge[key] for key in (
             "id", "title", "difficulty", "category", "model", "description", "behavior", "metric", "learning_objectives", "order"
         )}
-        for challenge in validate_challenges()
+        for challenge in validate_challenges() if challenge["status"] == "active"
     ]

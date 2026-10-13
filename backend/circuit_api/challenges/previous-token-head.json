@@ -10,7 +10,7 @@
     "d_model": 64
   },
   "description": "This checkpoint predicts the previous token at every position. Identify the attention head that routes that token into the output, then support your claim with an ablation.",
-  "behavior": "For an input sequence t₀, t₁, …, predict tᵢ₋₁ at every position i > 0.",
+  "behavior": "For an input sequence t\u2080, t\u2081, \u2026, predict t\u1d62\u208b\u2081 at every position i > 0.",
   "metric": "Previous-token accuracy",
   "examples": [
     {
@@ -70,7 +70,7 @@
   "hints": [
     "Compare attention across several heads.",
     "Inspect the row for a later sequence position.",
-    "The relevant attention is concentrated on position i−1.",
+    "The relevant attention is concentrated on position i\u22121.",
     "Ablate your candidate and compare accuracy."
   ],
   "public_dataset": [
@@ -140,7 +140,7 @@
   ],
   "order": 1,
   "task_goal": "Find the layer and head that carry the previous token, then demonstrate that ablating it damages the target behavior.",
-  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    # Average each head’s ablation effect across public examples.\n    scores = []\n    for layer in range(model.n_layers):\n        for head in range(model.n_heads):\n            drops = [tools.ablate_head(item[\"tokens\"], layer, head)[\"drop\"] for item in dataset]\n            scores.append((sum(drops) / len(drops), layer, head))\n    _, layer, head = max(scores)\n    print(\"Top candidates:\", sorted(scores, reverse=True)[:5])\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": layer, \"head\": head}]}\n",
+  "starter_code": "def solve(model, tokenizer, dataset, tools):\n    # Average each head\u2019s ablation effect across public examples.\n    scores = []\n    for layer in range(model.n_layers):\n        for head in range(model.n_heads):\n            drops = [tools.ablate_head(item[\"tokens\"], layer, head)[\"drop\"] for item in dataset]\n            scores.append((sum(drops) / len(drops), layer, head))\n    _, layer, head = max(scores)\n    print(\"Top candidates:\", sorted(scores, reverse=True)[:5])\n    return {\"components\": [{\"type\": \"attention_head\", \"layer\": layer, \"head\": head}]}\n",
   "schema_version": 1,
   "example_note": "The first position has no previous token and is excluded from the accuracy metric.",
   "explanation": {
@@ -158,7 +158,7 @@
       "field": "tools.events",
       "type": "list[{type: ablation, layer: int, head: int, measured values: float}]",
       "graded": true,
-      "checks": "Must contain an ablation of the submitted head with drop ≥ 0.5. The grader replays it on public and hidden sequences; hidden baseline must be ≥ 0.95 and mean hidden drop ≥ 0.5."
+      "checks": "Must contain an ablation of the submitted head with drop \u2265 0.5. The grader replays it on public and hidden sequences; hidden baseline must be \u2265 0.95 and mean hidden drop \u2265 0.5."
     }
   ],
   "tool_reference": [
@@ -202,5 +202,6 @@
       "type": "list",
       "description": "Reads a model weight matrix, such as W_Q, W_K, W_V, or W_O."
     }
-  ]
+  ],
+  "status": "archived"
 }

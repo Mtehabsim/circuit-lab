@@ -32,6 +32,12 @@ class ExperimentTools:
                     correct += predicted == expected
                     total += 1
                     continue
+                if getattr(model, "behavior", None) == "palindrome":
+                    expected = model.target_id(tokens)
+                    predicted = int(model(tokens, ablate=ablate)[-1].argmax())
+                    correct += predicted == expected
+                    total += 1
+                    continue
                 if len(tokens) < 2:
                     continue
                 predicted = model(tokens, ablate=ablate).argmax(dim=-1).tolist()
@@ -53,6 +59,12 @@ class ExperimentTools:
                         total += 1
                     continue
                 if getattr(self.model, "behavior", None) == "ioi":
+                    expected = self.model.target_id(tokens)
+                    predicted = int(self.model(tokens)[-1].argmax())
+                    correct += predicted == expected
+                    total += 1
+                    continue
+                if getattr(self.model, "behavior", None) == "palindrome":
                     expected = self.model.target_id(tokens)
                     predicted = int(self.model(tokens)[-1].argmax())
                     correct += predicted == expected
@@ -114,7 +126,23 @@ class ExperimentTools:
         one = [{"tokens": list(tokens)}]
         before = self._accuracy(self.model, one)
         after = self._accuracy(self.model, one, ablate=(layer, head))
-        event = {"type": "ablation", "layer": layer, "head": head, "before": before, "after": after, "drop": before - after}
+        event = {"type": "ablation", "layer": layer, "head": head, "tokens": list(tokens),
+                 "before": before, "after": after, "drop": before - after}
+        return self._record(event)
+
+    def ablate_components(self, dataset: list[dict[str, Any]], components: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """Ablate a proposed circuit together and measure its task effect."""
+        pairs = {(int(item["layer"]), int(item["head"])) for item in components
+                 if isinstance(item, dict) and item.get("type", "attention_head") == "attention_head"}
+        if not pairs:
+            raise ValueError("components must contain at least one attention head")
+        for layer, head in pairs:
+            self._validate_component(layer, head)
+        before = self._accuracy(self.model, dataset)
+        after = self._accuracy(self.model, dataset, ablate=pairs)
+        event = {"type": "circuit_ablation", "components": [
+            {"type": "attention_head", "layer": layer, "head": head} for layer, head in sorted(pairs)
+        ], "before": before, "after": after, "drop": before - after, "n_examples": len(dataset)}
         return self._record(event)
 
     def value_path(self, tokens: Sequence[str], layer: int, head: int, position: int) -> dict[str, Any]:
@@ -148,8 +176,34 @@ class ExperimentTools:
         position: int,
     ) -> dict[str, Any]:
         self._validate_component(layer, head)
-        if len(clean_tokens) != len(corrupted_tokens) or not 1 <= position < len(clean_tokens):
-            raise ValueError("clean and corrupted sequences must have equal length and a valid prediction position")
+        if len(clean_tokens) != len(corrupted_tokens):
+            raise ValueError("clean and corrupted sequences must have equal length")
+        if getattr(self.model, "behavior", None) == "palindrome":
+            if not 0 <= position < len(clean_tokens):
+                raise ValueError("position must refer to a content token")
+            internal_position = position + 1  # account for model's internal BOS marker
+            with torch.inference_mode():
+                clean_trace = self.model.run_with_trace(clean_tokens)
+                corrupted_trace = self.model.run_with_trace(corrupted_tokens)
+                replacement = clean_trace.head_outputs[layer, head, internal_position]
+                patched_trace = self.model.run_with_trace(
+                    corrupted_tokens, patch=(layer, head, internal_position, replacement)
+                )
+                clean_target = self.model.target_id(clean_tokens)
+                corrupt_target = self.model.target_id(corrupted_tokens)
+                clean_margin = float((clean_trace.logits[-1, clean_target] - clean_trace.logits[-1, 1-clean_target]))
+                corrupted_margin = float((corrupted_trace.logits[-1, clean_target] - corrupted_trace.logits[-1, 1-clean_target]))
+                patched_margin = float((patched_trace.logits[-1, clean_target] - patched_trace.logits[-1, 1-clean_target]))
+            event = {"type": "activation_patch", "component": "attention_head_output", "layer": layer,
+                     "head": head, "position": position, "clean_tokens": list(clean_tokens),
+                     "corrupted_tokens": list(corrupted_tokens), "clean_target": clean_target,
+                     "corrupted_target": corrupt_target, "clean_logit_difference": clean_margin,
+                     "corrupted_logit_difference": corrupted_margin, "patched_logit_difference": patched_margin,
+                     "recovery": patched_margin - corrupted_margin}
+            self.traces["patching"] = event
+            return self._record(event)
+        if not 1 <= position < len(clean_tokens):
+            raise ValueError("position must be a prediction position from 1 to sequence length - 1")
         with torch.inference_mode():
             clean_trace = self.model.run_with_trace(clean_tokens)
             corrupted_trace = self.model.run_with_trace(corrupted_tokens)
@@ -174,16 +228,48 @@ class ExperimentTools:
         self.traces["patching"] = event
         return event
 
+    def patch_residual(
+        self, clean_tokens: Sequence[str], corrupted_tokens: Sequence[str], layer: int, position: int
+    ) -> dict[str, Any]:
+        """Patch one post-block residual vector; position=-1 refers to the final EOS marker."""
+        if getattr(self.model, "behavior", None) != "palindrome":
+            raise ValueError("Residual patching is currently enabled for the Palindrome Machine checkpoint")
+        if len(clean_tokens) != len(corrupted_tokens):
+            raise ValueError("clean and corrupted sequences must have equal length")
+        if not 0 <= layer < self.model.n_layers:
+            raise ValueError(f"layer must be an integer from 0 to {self.model.n_layers - 1}")
+        internal_position = len(clean_tokens) + 1 if position == -1 else position
+        if not isinstance(position, int) or not 0 <= internal_position < len(clean_tokens) + 2:
+            raise ValueError("position must be an internal token index or -1 for final EOS")
+        with torch.inference_mode():
+            clean_trace = self.model.run_with_trace(clean_tokens)
+            corrupted_trace = self.model.run_with_trace(corrupted_tokens)
+            replacement = clean_trace.residual_by_layer[layer + 1, internal_position]
+            patched_trace = self.model.run_with_trace(corrupted_tokens, patch={
+                "type": "residual", "layer": layer, "position": internal_position, "value": replacement
+            })
+            clean_target = self.model.target_id(clean_tokens)
+            corrupted_target = self.model.target_id(corrupted_tokens)
+            clean_margin = float(clean_trace.logits[-1, clean_target] - clean_trace.logits[-1, 1-clean_target])
+            corrupted_margin = float(corrupted_trace.logits[-1, clean_target] - corrupted_trace.logits[-1, 1-clean_target])
+            patched_margin = float(patched_trace.logits[-1, clean_target] - patched_trace.logits[-1, 1-clean_target])
+        event = {"type": "residual_patch", "layer": layer, "position": position,
+                 "clean_tokens": list(clean_tokens), "corrupted_tokens": list(corrupted_tokens),
+                 "clean_target": clean_target, "corrupted_target": corrupted_target,
+                 "clean_logit_difference": clean_margin, "corrupted_logit_difference": corrupted_margin,
+                 "patched_logit_difference": patched_margin, "recovery": patched_margin - corrupted_margin}
+        self.traces["patching"] = event
+        return self._record(event)
+
     def ablation_sweep(self, tokens: Sequence[str]) -> list[dict[str, Any]]:
         results = [self.ablate_head(tokens, layer, head) for layer in range(self.model.n_layers) for head in range(self.model.n_heads)]
         return sorted(results, key=lambda result: result["drop"], reverse=True)
 
-    @staticmethod
-    def _validate_component(layer: int, head: int) -> None:
-        if not isinstance(layer, int) or not 0 <= layer < 4:
-            raise ValueError("layer must be an integer from 0 to 3")
-        if not isinstance(head, int) or not 0 <= head < 4:
-            raise ValueError("head must be an integer from 0 to 3")
+    def _validate_component(self, layer: int, head: int) -> None:
+        if not isinstance(layer, int) or not 0 <= layer < self.model.n_layers:
+            raise ValueError(f"layer must be an integer from 0 to {self.model.n_layers - 1}")
+        if not isinstance(head, int) or not 0 <= head < self.model.n_heads:
+            raise ValueError(f"head must be an integer from 0 to {self.model.n_heads - 1}")
 
     def _record(self, event: dict[str, Any]) -> dict[str, Any]:
         versioned = {"event_version": 1, **event}

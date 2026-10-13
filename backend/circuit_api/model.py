@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import torch
 from torch import Tensor, nn
+
+
+def _is_ablated(ablate: Any, layer: int, head: int) -> bool:
+    if isinstance(ablate, (set, frozenset, list)):
+        return (layer, head) in ablate
+    return ablate == (layer, head)
 
 
 @dataclass(frozen=True)
@@ -23,23 +29,68 @@ class RunTrace:
     attention_logits: Tensor | None = None
 
 
-class ModelAdapter:
+class ModelAdapter(nn.Module):
     """Common, named-activation interface for the small challenge checkpoints."""
 
     def __init__(self, model: nn.Module) -> None:
-        self._model = model
+        super().__init__()
+        self.inner = model
 
     def __getattr__(self, name: str):
-        return getattr(self._model, name)
-
-    def __call__(self, tokens: Sequence[str], *, ablate=None) -> Tensor:
-        return self._model(tokens, ablate=ablate)
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            inner = super().__getattr__("inner")
+            aliases = {"W_Q": "q_proj", "W_K": "k_proj", "W_V": "v_proj", "W_O": "o_proj"}
+            return getattr(inner, aliases.get(name, name))
 
     def forward(self, tokens: Sequence[str], *, ablate=None) -> Tensor:
-        return self._model(tokens, ablate=ablate)
+        return self.inner(tokens, ablate=ablate)
 
     def run_with_trace(self, tokens: Sequence[str], *, ablate=None, patch=None) -> RunTrace:
-        return self._model.run_with_trace(tokens, ablate=ablate, patch=patch)
+        return self.inner.run_with_trace(tokens, ablate=ablate, patch=patch)
+
+    def run(self, prompt: Sequence[str] | str) -> Tensor:
+        return self(prompt.split() if isinstance(prompt, str) else prompt)
+
+    def run_with_cache(self, prompt: Sequence[str] | str, *, ablate=None) -> tuple[Tensor, dict[str, Tensor]]:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        trace = self.run_with_trace(tokens, ablate=ablate)
+        return trace.logits, self.activation_cache(tokens, ablate=ablate)
+
+    def get_logits(self, prompt: Sequence[str] | str) -> Tensor:
+        return self.run(prompt)
+
+    def get_attention(self, prompt: Sequence[str] | str, layer: int, head: int) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        return self.run_with_trace(tokens).attention[layer, head]
+
+    def get_q(self, prompt: Sequence[str] | str, layer: int, head: int) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        trace = self.run_with_trace(tokens)
+        if trace.query is None:
+            raise ValueError("This model does not expose query activations")
+        return trace.query[layer, head]
+
+    def get_k(self, prompt: Sequence[str] | str, layer: int, head: int) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        trace = self.run_with_trace(tokens)
+        if trace.key is None:
+            raise ValueError("This model does not expose key activations")
+        return trace.key[layer, head]
+
+    def get_v(self, prompt: Sequence[str] | str, layer: int, head: int) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        return self.run_with_trace(tokens).head_values[layer, head]
+
+    def get_head_output(self, prompt: Sequence[str] | str, layer: int, head: int) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        return self.run_with_trace(tokens).head_outputs[layer, head]
+
+    def get_residual(self, prompt: Sequence[str] | str, layer: int | None = None) -> Tensor:
+        tokens = prompt.split() if isinstance(prompt, str) else prompt
+        name = "resid.final" if layer is None else f"blocks.{layer}.resid.post"
+        return self.activation(tokens, name)
 
     def activation_cache(self, tokens: Sequence[str], *, ablate=None) -> dict[str, Tensor]:
         trace = self.run_with_trace(tokens, ablate=ablate)
@@ -48,8 +99,13 @@ class ModelAdapter:
             cache[f"blocks.{layer}.attn.pattern"] = trace.attention[layer]
             cache[f"blocks.{layer}.attn.value"] = trace.head_values[layer]
             cache[f"blocks.{layer}.attn.output"] = trace.head_outputs[layer]
+            cache[f"blocks.{layer}.hook_resid_pre"] = trace.residual_by_layer[layer] if trace.residual_by_layer is not None else trace.residual
             if trace.residual_by_layer is not None:
                 cache[f"blocks.{layer}.resid.post"] = trace.residual_by_layer[layer + 1]
+                cache[f"blocks.{layer}.hook_resid_post"] = trace.residual_by_layer[layer + 1]
+            if getattr(trace, "mlp_activations", None) is not None:
+                cache[f"blocks.{layer}.mlp.hook_post"] = trace.mlp_activations[layer]
+                cache[f"blocks.{layer}.mlp.hook_out"] = trace.mlp_outputs[layer]
             if trace.query is not None and trace.key is not None:
                 cache[f"blocks.{layer}.attn.q"] = trace.query[layer]
                 cache[f"blocks.{layer}.attn.k"] = trace.key[layer]
@@ -125,7 +181,7 @@ class PreviousTokenTransformer(nn.Module):
         self,
         tokens: Sequence[str],
         *,
-        ablate: tuple[int, int] | None = None,
+        ablate: Any = None,
         patch: tuple[int, int, int, Tensor] | None = None,
     ) -> RunTrace:
         ids = SequenceTokenizer(self.d_model).encode(tokens).to(self.embedding.weight.device)
@@ -162,7 +218,7 @@ class PreviousTokenTransformer(nn.Module):
                 patterns[layer, head] = pattern
                 result = pattern @ v @ self.o_proj[layer, head]
                 outputs[layer, head] = result
-                if ablate == (layer, head):
+                if _is_ablated(ablate, layer, head):
                     result = torch.zeros_like(result)
                 if patch is not None:
                     patch_layer, patch_head, position, replacement = patch
@@ -220,7 +276,7 @@ class InductionTransformer(nn.Module):
 
         # First head writes the previous token identity into a separate residual subspace.
         for position in range(1, length):
-            if ablate != (0, 0):
+            if not _is_ablated(ablate, 0, 0):
                 attention[0, 0, position, position - 1] = 1.0
                 residual[position, 64 + int(ids[position - 1])] = 1.0
                 values[0, 0, position - 1, :64] = token_vectors[position - 1, :64]
@@ -247,7 +303,7 @@ class InductionTransformer(nn.Module):
             if not torch.isfinite(row).any():
                 continue
             attention[1, 1, position] = row.softmax(dim=-1)
-            if ablate != (1, 1):
+            if not _is_ablated(ablate, 1, 1):
                 output = attention[1, 1, position] @ values[1, 1]
                 outputs[1, 1, position] = output
                 residual[position] = output
@@ -329,12 +385,12 @@ class IOIToyTransformer(nn.Module):
         query = length - 1
         subject_position = next((i for i, token in enumerate(tokens) if token in {"SUBJECT_A", "SUBJECT_B"}), None)
         subject = self.target_id(tokens) ^ 1
-        if subject_position is not None and ablate != (0, 0):
+        if subject_position is not None and not _is_ablated(ablate, 0, 0):
             attention[0, 0, query, subject_position] = 1.0
             outputs[0, 0, query, subject] = 1.0
-        chosen_name = 1 - subject if subject_position is not None and ablate != (0, 0) else 0
+        chosen_name = 1 - subject if subject_position is not None and not _is_ablated(ablate, 0, 0) else 0
         name_position = chosen_name
-        if ablate != (2, 1):
+        if not _is_ablated(ablate, 2, 1):
             attention[2, 1, query, name_position] = 1.0
             values[2, 1, name_position, chosen_name] = 1.0
             outputs[2, 1, query, chosen_name] = 1.0
@@ -407,6 +463,9 @@ def load_ioi_checkpoint(path: str) -> IOIToyTransformer:
 
 
 def load_model(model_name: str, path: str) -> nn.Module:
+    if model_name == "palindrome-trained":
+        from .palindrome import load_checkpoint as load_palindrome_checkpoint
+        return load_palindrome_checkpoint(path)
     if model_name == "induction-toy":
         return load_induction_checkpoint(path)
     if model_name in {"prev-token-toy", "decoy-head-toy", "ov-path-toy", "patching-toy"}:
@@ -417,6 +476,9 @@ def load_model(model_name: str, path: str) -> nn.Module:
 
 
 def make_tokenizer(model_name: str, width: int) -> SequenceTokenizer | IOITokenizer:
+    if model_name == "palindrome-trained":
+        from .palindrome import PalindromeTokenizer
+        return PalindromeTokenizer()
     if model_name == "ioi-toy":
         return IOITokenizer()
     return SequenceTokenizer(width)
